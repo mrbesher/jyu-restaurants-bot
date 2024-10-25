@@ -1,0 +1,33 @@
+name: Post Daily Menus to Telegram
+
+on:
+  schedule:
+    # Run every day at 23:29 (UTC)
+    - cron: '29 20 * * *' # 20:29 UTC is 23:29 in Helsinki time
+
+  workflow_dispatch: # Allows you to manually run the script if needed
+
+jobs:
+  post-menus:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requirements.txt
+
+      - name: Run the daily menu script
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          python app.py
