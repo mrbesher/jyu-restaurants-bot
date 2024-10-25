@@ -3,7 +3,7 @@ name: Post Daily Menus to Telegram
 on:
   schedule:
     # Run every day at 23:29 (UTC)
-    - cron: '29 20 * * *' # 20:29 UTC is 23:29 in Helsinki time
+    - cron: '30 7 * * *' # 20:29 UTC is 23:29 in Helsinki time
 
   workflow_dispatch: # Allows you to manually run the script if needed
 
@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requirements.txt
+          pip install -r requirements.txt
 
       - name: Run the daily menu script
         env:
