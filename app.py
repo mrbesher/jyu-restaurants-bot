@@ -78,9 +78,7 @@ def split_message_safely(message: str, max_length: int = 4000) -> List[str]:
     return chunks
 
 
-def format_menu_message(
-    menu_data: Dict[str, Any], default_price: str = None
-) -> Tuple[str, str]:
+def format_menu_message(menu_data: Dict[str, Any]) -> Tuple[str, str]:
     """Format menu data into readable messages, returning both regular and vegan only messages."""
     if not menu_data or not menu_data.get("MenusForDays"):
         return "", ""
@@ -104,7 +102,7 @@ def format_menu_message(
         components = [comp.replace("*", "\\*") for comp in menu["Components"]]
         components_str = "\n- ".join(components)
 
-        price_str = f" ({price})" if price != default_price else ""
+        price_str = f" ({price})"
         regular_parts.append(f"*{menu_name}*{price_str}\n- {components_str}\n")
 
     vegan_components = []
@@ -113,12 +111,12 @@ def format_menu_message(
             continue
 
         menu_vegan_components = [
-            comp for comp in components if is_vegan_component(comp)
+            comp for comp in menu["Components"] if is_vegan_component(comp)
         ]
         if menu_vegan_components:
             menu_name = menu["Name"]
             price = menu["Price"]
-            price_str = f" ({price})" if price != default_price else ""
+            price_str = f" ({price})"
             components_str = "\n- ".join(menu_vegan_components)
             vegan_components.append(f"*{menu_name}*{price_str}\n- {components_str}\n")
 
@@ -134,7 +132,7 @@ def format_menu_message(
     ) if vegan_parts else ""
 
 
-async def send_message_chunks(bot: Bot, text: str) -> None:
+async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> None:
     """Safely send message in chunks to Telegram."""
     if not text:
         return
@@ -142,10 +140,13 @@ async def send_message_chunks(bot: Bot, text: str) -> None:
     chunks = split_message_safely(text)
     for chunk in chunks:
         try:
-            await bot.send_message(
-                chat_id=CHANNEL_ID, text=chunk, parse_mode="Markdown"
-            )
-            await asyncio.sleep(0.1)
+            if dry_run:
+                logger.info(f"[DRY RUN] Would send to Telegram: {chunk}")
+            else:
+                await bot.send_message(
+                    chat_id=CHANNEL_ID, text=chunk, parse_mode="Markdown"
+                )
+                await asyncio.sleep(0.1)
         except TelegramError as e:
             logger.error(f"Error sending message to Telegram: {str(e)}")
             logger.error(f"Problematic chunk: {chunk}")
@@ -166,6 +167,7 @@ async def get_chefs_choice(vegan_menus: str) -> str:
     data = {
         "messages": [{"role": "user", "content": prompt}],
         "model": "llama-3.1-70b-versatile",
+        "temperature": 0.2
     }
 
     try:
@@ -184,7 +186,7 @@ async def get_chefs_choice(vegan_menus: str) -> str:
         return ""
 
 
-async def post_daily_menus(day_offset: int = 0):
+async def post_daily_menus(day_offset: int = 0, dry_run: bool = False):
     """Fetch and post vegan restaurant menus to the Telegram channel."""
     bot = Bot(TELEGRAM_BOT_TOKEN)
     target_date = datetime.now() + timedelta(days=day_offset)
@@ -194,54 +196,35 @@ async def post_daily_menus(day_offset: int = 0):
             tasks = [fetch_menu(session, url) for url in RESTAURANT_URLS]
             menus = await asyncio.gather(*tasks)
 
-            all_prices = []
-            for menu_data in menus:
-                if menu_data and menu_data.get("MenusForDays"):
-                    today_menu = menu_data["MenusForDays"][0]
-                    if today_menu and today_menu["SetMenus"]:
-                        all_prices.extend(
-                            menu["Price"]
-                            for menu in today_menu["SetMenus"]
-                            if menu.get("Price")
-                        )
-
-            default_price = (
-                max(set(all_prices), key=all_prices.count) if all_prices else None
-            )
-
             vegan_message_parts = []
             formatted_date = target_date.strftime("%A, %B %d")
 
-            price_header = (
-                f"🗓 *{formatted_date}*\n💰 *Price: {default_price}*\n"
-                if default_price
-                else f"🗓 *{formatted_date}*\n"
-            )
-            vegan_message_parts.append(price_header)
+            date_header = f"🗓 *{formatted_date}*\n"
+            vegan_message_parts.append(date_header)
 
-            default_price_menus = []
+            all_vegan_menus = []
             for menu_data in menus:
                 if menu_data:
-                    _, vegan_menu = format_menu_message(menu_data, default_price)
+                    _, vegan_menu = format_menu_message(menu_data)
                     if vegan_menu:
                         vegan_message_parts.append(vegan_menu)
                         vegan_message_parts.append("-" * 3 + "\n")
-                        
-                        # if the menu doesn't contain a price (it's the default price)
-                        if not re.search(r'\(.*\d+,\d+.*\)', vegan_menu):
-                            default_price_menus.append(vegan_menu)
+                        all_vegan_menus.append(vegan_menu)
 
             if vegan_message_parts:
                 vegan_header = f"🌱 *Vegan options for {formatted_date}*\n\n"
                 vegan_full_message = vegan_header + "\n".join(vegan_message_parts)
 
-                chefs_choice = await get_chefs_choice("\n\n".join(default_price_menus))
+                if dry_run:
+                    logger.info(f"[DRY RUN] Sending to chef for analysis: {all_vegan_menus}")
+
+                chefs_choice = await get_chefs_choice("\n\n".join(all_vegan_menus))
                 if chefs_choice:
                     vegan_full_message += (
                         "\n\n👨‍🍳 *Chef's Choice of the Day*\n" + chefs_choice
                     )
 
-                await send_message_chunks(bot, vegan_full_message)
+                await send_message_chunks(bot, vegan_full_message, dry_run)
                 logger.info("Successfully posted vegan menu summary to channel")
             else:
                 logger.warning(
@@ -262,8 +245,13 @@ if __name__ == "__main__":
         default=0,
         help="Number of days to offset from today (0 for today, 1 for tomorrow, etc.)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run without sending messages to Telegram",
+    )
 
     args = parser.parse_args()
 
-    logger.info(f"Posting menus for {args.days} days from now")
-    asyncio.run(post_daily_menus(args.days))
+    logger.info(f"Posting menus for {args.days} days from now (dry run: {args.dry_run})")
+    asyncio.run(post_daily_menus(args.days, args.dry_run))
