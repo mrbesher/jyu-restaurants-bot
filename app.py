@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 CHANNEL_ID = "@jyu_yliopiston_ravintolat"
-CHANNEL_ID = "@jyu_restaurant_test"
 
 
 RESTAURANT_URLS = [
