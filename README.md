@@ -1,6 +1,6 @@
 # Semma Restaurants' Vegan Menu Bot
 
-Sends vegan options with an LLM recommendation from Semma's restaurants and posts daily to a Telegram channel.
+Sends vegan options with an LLM recommendation from Semma's restaurants and posts daily to a [Telegram channel](https://t.me/jyu_yliopiston_ravintolat).
 
 ## What it does
 - Grabs menus from Semma's restaurants (semma.fi)
