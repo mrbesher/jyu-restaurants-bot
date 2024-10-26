@@ -3,8 +3,8 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
 import re
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
 
 import aiohttp
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 CHANNEL_ID = "@jyu_yliopiston_ravintolat"
+CHANNEL_ID = "@jyu_restaurant_test"
 
 
 RESTAURANT_URLS = [
@@ -51,7 +52,7 @@ async def fetch_menu(session: aiohttp.ClientSession, url: str) -> Dict[str, Any]
 
 def is_vegan_component(component: str) -> bool:
     """Check if a component is vegan using regex."""
-    vegan_pattern = r'\([^()]*\b[Vv]eg\b[^()]*\)'
+    vegan_pattern = r"\([^()]*\b[Vv]eg\b[^()]*\)"
     return bool(re.search(vegan_pattern, component))
 
 
@@ -78,8 +79,8 @@ def split_message_safely(message: str, max_length: int = 4000) -> List[str]:
     return chunks
 
 
-def format_menu_message(menu_data: Dict[str, Any]) -> Tuple[str, str]:
-    """Format menu data into readable messages, returning both regular and vegan only messages."""
+def format_menu_message(menu_data: Dict[str, Any]) -> str:
+    """Format menu data into readable messages, returning vegan only lunch options."""
     if not menu_data or not menu_data.get("MenusForDays"):
         return "", ""
 
@@ -87,49 +88,38 @@ def format_menu_message(menu_data: Dict[str, Any]) -> Tuple[str, str]:
     today_menu = menu_data["MenusForDays"][0]
 
     if not today_menu or not today_menu["SetMenus"]:
-        return "", ""
-
-    regular_parts = [f"🍽 *{restaurant_name}*"]
-    if today_menu["LunchTime"]:
-        regular_parts.append(f"⏰ {today_menu['LunchTime']}\n")
-
-    for menu in today_menu["SetMenus"]:
-        if not menu["Components"]:
-            continue
-
-        menu_name = menu["Name"]
-        price = menu["Price"]
-        components = [comp.replace("*", "\\*") for comp in menu["Components"]]
-        components_str = "\n- ".join(components)
-
-        price_str = f" ({price})"
-        regular_parts.append(f"*{menu_name}*{price_str}\n- {components_str}\n")
+        return ""
 
     vegan_components = []
     for menu in today_menu["SetMenus"]:
         if not menu["Components"]:
             continue
 
+        components = [comp.replace("*", "☆") for comp in menu["Components"]]
         menu_vegan_components = [
-            comp for comp in menu["Components"] if is_vegan_component(comp)
+            comp for comp in components if is_vegan_component(comp)
+        ]
+        menu_vegan_components = [
+            re.sub(r"[^\S\r\n]*[_\*]*\(.*\)[_*]*[^\S\r\n]*", "", comp)
+            for comp in menu_vegan_components
         ]
         if menu_vegan_components:
-            menu_name = menu["Name"]
+            menu_name: str = menu["Name"]
+            if "lunch" not in menu_name.lower():
+                continue
             price = menu["Price"]
-            price_str = f" ({price})"
-            components_str = "\n- ".join(menu_vegan_components)
-            vegan_components.append(f"*{menu_name}*{price_str}\n- {components_str}\n")
+            price_str = f"\n_({price})_"
+            components_str = "\n• ".join(menu_vegan_components)
+            vegan_components.append(f"*{menu_name}*{price_str}\n• {components_str}\n")
 
     vegan_parts = []
     if vegan_components:
-        vegan_parts = [f"🌱 *{restaurant_name}*"]
+        vegan_parts = [f"🍽️ *{restaurant_name}*"]
         if today_menu["LunchTime"]:
             vegan_parts.append(f"⏰ {today_menu['LunchTime']}\n")
         vegan_parts.extend(vegan_components)
 
-    return "\n".join(regular_parts) if regular_parts else "", "\n".join(
-        vegan_parts
-    ) if vegan_parts else ""
+    return "\n".join(vegan_parts) if vegan_parts else ""
 
 
 async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> None:
@@ -160,14 +150,12 @@ async def get_chefs_choice(vegan_menus: str) -> str:
         "Content-Type": "application/json",
     }
 
-    prompt = f"""Analyze these vegan menu options and select the most appealing restaurant menu from those. Return ONLY the restaurant name followed by its menu EXACTLY as formatted in the input. Don't add any explanation or commentary:
-
-    {vegan_menus}"""
+    prompt = f"""{vegan_menus}\n\nAnalyze the vegan menu options and select the most appealing restaurant menu from those. Return ONLY "🍽️ restaurant name" followed by its menu EXACTLY as formatted in the input. After the menu write "💬 Comment:" and one sentence about the main dish from the menu you chose for those who don't know it. Make the comment italic using underscores. Don't add any other explanation or commentary."""
 
     data = {
         "messages": [{"role": "user", "content": prompt}],
         "model": "llama-3.1-70b-versatile",
-        "temperature": 0.2
+        "temperature": 0.4,
     }
 
     try:
@@ -176,10 +164,7 @@ async def get_chefs_choice(vegan_menus: str) -> str:
                 response.raise_for_status()
                 result = await response.json()
                 choice = result["choices"][0]["message"]["content"]
-                
-                # remove unescaped asterisks
-                choice = re.sub(r'(?<!\\)\*', '', choice)
-                
+
                 return choice
     except Exception as e:
         logger.error(f"Error getting chef's choice: {str(e)}")
@@ -199,26 +184,29 @@ async def post_daily_menus(day_offset: int = 0, dry_run: bool = False):
             vegan_message_parts = []
             formatted_date = target_date.strftime("%A, %B %d")
 
-            date_header = f"🗓 *{formatted_date}*\n"
-            vegan_message_parts.append(date_header)
-
             all_vegan_menus = []
             for menu_data in menus:
                 if menu_data:
-                    _, vegan_menu = format_menu_message(menu_data)
+                    vegan_menu = format_menu_message(menu_data)
                     if vegan_menu:
                         vegan_message_parts.append(vegan_menu)
-                        vegan_message_parts.append("-" * 3 + "\n")
+                        vegan_message_parts.append("➖" * 5 + "\n")
                         all_vegan_menus.append(vegan_menu)
 
             if vegan_message_parts:
-                vegan_header = f"🌱 *Vegan options for {formatted_date}*\n\n"
-                vegan_full_message = vegan_header + "\n".join(vegan_message_parts)
+                vegan_header = f"🌱 *{formatted_date}*\n\n"
+                vegan_full_message = vegan_header + "".join(vegan_message_parts)
+
+
+                chef_menu = "\n\n".join(all_vegan_menus)
+                chef_menu = re.sub(r"\s*[_\*]*\(.*\)[_*]*[^\S\r\n]*", "", chef_menu)
 
                 if dry_run:
-                    logger.info(f"[DRY RUN] Sending to chef for analysis: {all_vegan_menus}")
-
-                chefs_choice = await get_chefs_choice("\n\n".join(all_vegan_menus))
+                    logger.info(
+                        f"[DRY RUN] Sending to chef for analysis: {chef_menu}"
+                    )
+                
+                chefs_choice = await get_chefs_choice(chef_menu)
                 if chefs_choice:
                     vegan_full_message += (
                         "\n\n👨‍🍳 *Chef's Choice of the Day*\n" + chefs_choice
@@ -253,5 +241,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    logger.info(f"Posting menus for {args.days} days from now (dry run: {args.dry_run})")
+    logger.info(
+        f"Posting menus for {args.days} days from now (dry run: {args.dry_run})"
+    )
     asyncio.run(post_daily_menus(args.days, args.dry_run))
