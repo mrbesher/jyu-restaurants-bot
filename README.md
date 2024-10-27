@@ -14,4 +14,4 @@ Sends daily menu options from student restaurants with student discounts in Jyv�
 2. Install requirements
 3. `python app.py --diets Veg L G`
 
-> I am not affiliated with the University of Jyväskylä, JYY, or any of the restaurants. I just want to make it easier to find a great meal! 🥗
+> I am not affiliated with Semma, University of Jyväskylä, JYY or Compass Group. I just like their food! 🥗
