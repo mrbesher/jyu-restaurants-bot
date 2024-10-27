@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -108,7 +109,7 @@ async def format_restaurant_menu(restaurant: Dict, diets: Set[str], session: aio
         return None
 
     opening_hours = restaurant.get('opening_hours', '')
-    price_time = f"⏰ {opening_hours} 💰 _{common_price}_\n" if opening_hours and common_price else ""
+    price_time = f"⏰ {opening_hours} 💶 _{common_price}_\n" if opening_hours and common_price else ""
     menu_text = "\n• ".join(menu_items)
     
     return f"🍽️ *{name}{location_name}*\n{price_time}• {menu_text}\n"
@@ -179,7 +180,9 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False):
 
             if menu_parts:
                 diet_str = " & ".join(diets)
-                header = f"🌱 *{diet_str} Menu Today*\n\n"
+                current_date = datetime.date.today()
+                formatted_date = current_date.strftime("%A, %B %d")
+                header = f"🌱 *{diet_str} Menu for {formatted_date}*\n\n"
                 full_message = header + "".join(menu_parts)
 
                 if not dry_run:
