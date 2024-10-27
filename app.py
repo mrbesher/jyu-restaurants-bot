@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 import datetime
-import json
 import logging
 import os
 from typing import Dict, List, Optional, Set
@@ -17,23 +16,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]    
+TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 CHANNEL_ID = "@jyu_yliopiston_ravintolat"
 LUNCHES_API = "https://jybar.app.jyu.fi/api/2/lunches"
 
-async def get_location_name(lat: float, lon: float, session: aiohttp.ClientSession) -> str:
+
+async def get_location_name(
+    lat: float, lon: float, session: aiohttp.ClientSession
+) -> str:
     """Get location name from coordinates using OpenStreetMap."""
     url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
     try:
         async with session.get(url) as response:
             if response.status == 200:
                 data = await response.json()
-                address = data.get('address', {})
-                return address.get('suburb') or address.get('neighbourhood') or ""
+                address = data.get("address", {})
+                return address.get("suburb") or address.get("neighbourhood") or ""
     except Exception as e:
         logger.error(f"Error fetching location name: {e}")
     return ""
+
 
 async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
     """Fetch menus from the JYU API."""
@@ -46,51 +49,58 @@ async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
         logger.error(f"Error fetching menus: {e}")
         return []
 
+
 def get_most_common_price(items: List[List[Dict]]) -> Optional[str]:
     """Find the most common price in the menu items."""
     price_counts = {}
     for item_group in items:
         for item in item_group:
-            price = item.get('price', '').strip()
+            price = item.get("price", "").strip()
             if price:
                 price_counts[price] = price_counts.get(price, 0) + 1
-    
+
     if not price_counts:
         return None
-    
+
     return max(price_counts.items(), key=lambda x: x[1])[0]
+
 
 def format_menu_item(item: Dict, seen_items: set, common_price: str) -> Optional[str]:
     """Format a single menu item and track duplicates."""
     name = item.get("name", "").strip()
     if not name or name in seen_items:
         return None
-    
-    price = item.get('price', '').strip()
+
+    price = item.get("price", "").strip()
     if price and price != common_price:
         return None
-    
+
     seen_items.add(name)
     return name
 
-async def format_restaurant_menu(restaurant: Dict, diets: Set[str], session: aiohttp.ClientSession) -> Optional[str]:
+
+async def format_restaurant_menu(
+    restaurant: Dict, diets: Set[str], session: aiohttp.ClientSession
+) -> Optional[str]:
     """Format a restaurant's menu items."""
     name = restaurant.get("name", "").strip()
     location = restaurant.get("location", {})
     items = restaurant.get("items", [])
-    
+
     if not name or not items:
         return None
 
     location_name = ""
     if location.get("lat") and location.get("lon"):
-        osm_location = await get_location_name(location["lat"], location["lon"], session)
+        osm_location = await get_location_name(
+            location["lat"], location["lon"], session
+        )
         if osm_location:
             location_name = f" ({osm_location})"
 
     seen_items = set()
     menu_items = []
-    
+
     common_price = get_most_common_price(items)
 
     for item_group in items:
@@ -101,18 +111,23 @@ async def format_restaurant_menu(restaurant: Dict, diets: Set[str], session: aio
                 formatted_item = format_menu_item(item, seen_items, common_price)
                 if formatted_item:
                     filtered_items.append(formatted_item)
-        
+
         if filtered_items:
             menu_items.extend(filtered_items)
 
     if not menu_items:
         return None
 
-    opening_hours = restaurant.get('opening_hours', '')
-    price_time = f"⏰ {opening_hours} 💶 _{common_price}_\n" if opening_hours and common_price else ""
+    opening_hours = restaurant.get("opening_hours", "")
+    price_time = (
+        f"⏰ {opening_hours} 💶 _{common_price}_\n"
+        if opening_hours and common_price
+        else ""
+    )
     menu_text = "\n• ".join(menu_items)
-    
+
     return f"🍽️ *{name}{location_name}*\n{price_time}• {menu_text}\n"
+
 
 async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> None:
     """Safely send message in chunks to Telegram."""
@@ -132,6 +147,7 @@ async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> Non
         except TelegramError as e:
             logger.error(f"Error sending message to Telegram: {str(e)}")
             logger.error(f"Problematic chunk: {chunk}")
+
 
 async def get_chefs_choice(diet_menus: str) -> str:
     """Use Groq API to analyze menus and select the best option."""
@@ -159,6 +175,7 @@ async def get_chefs_choice(diet_menus: str) -> str:
         logger.error(f"Error getting chef's choice: {e}")
         return ""
 
+
 async def post_daily_menus(diets: List[str], dry_run: bool = False):
     """Fetch and post restaurant menus to the Telegram channel."""
     bot = Bot(TELEGRAM_BOT_TOKEN)
@@ -167,7 +184,7 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False):
     try:
         async with aiohttp.ClientSession() as session:
             restaurants = await fetch_menus(session)
-            
+
             menu_parts = []
             all_menus = []
 
@@ -188,7 +205,9 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False):
                 if not dry_run:
                     chefs_choice = await get_chefs_choice("\n\n".join(all_menus))
                     if chefs_choice:
-                        full_message += "\n\n👨‍🍳 *Chef's Choice of the Day*\n" + chefs_choice
+                        full_message += (
+                            "\n\n👨‍🍳 *Chef's Choice of the Day*\n" + chefs_choice
+                        )
 
                 await send_message_chunks(bot, full_message, dry_run)
                 logger.info(f"Successfully posted {diet_str} menu summary to channel")
@@ -198,8 +217,11 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False):
     except Exception as e:
         logger.error(f"Error in post_daily_menus: {e}")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Post restaurant menus to Telegram channel")
+    parser = argparse.ArgumentParser(
+        description="Post restaurant menus to Telegram channel"
+    )
     parser.add_argument(
         "--diets",
         type=str,
