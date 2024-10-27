@@ -2,10 +2,9 @@ name: Post Daily Menus to Telegram
 
 on:
   schedule:
-    # Run every day at 23:29 (UTC)
-    - cron: '30 7 * * *' # 20:29 UTC is 23:29 in Helsinki time
+    - cron: '30 7 * * *'
 
-  workflow_dispatch: # Allows you to manually run the script if needed
+  workflow_dispatch: # allows manual run
 
 jobs:
   post-menus:
