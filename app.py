@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]    
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-CHANNEL_ID = "@jyu_restaurant_test"
+CHANNEL_ID = "@jyu_yliopiston_ravintolat"
 LUNCHES_API = "https://jybar.app.jyu.fi/api/2/lunches"
 
 async def get_location_name(lat: float, lon: float, session: aiohttp.ClientSession) -> str:
