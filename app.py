@@ -3,9 +3,7 @@ import asyncio
 import json
 import logging
 import os
-import re
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, NamedTuple
+from typing import Dict, List, Optional, Set
 
 import aiohttp
 from telegram import Bot
@@ -18,146 +16,102 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]
+TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]    
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-CHANNEL_ID = "@jyu_yliopiston_ravintolat"
+CHANNEL_ID = "@jyu_restaurant_test"
+LUNCHES_API = "https://jybar.app.jyu.fi/api/2/lunches"
 
-
-class Restaurant(NamedTuple):
-    id: str
-    name: str
-    location: str
-    costNumber: str
-
-
-RESTAURANTS = [
-    Restaurant("207659", "Maija", "Mattilanniemi", "1402"),
-    Restaurant("207735", "Piato", "Mattilanniemi", "1408"),
-    Restaurant("207412", "Tilia", "Seminaarimäki", "1413"),
-    Restaurant("207272", "Lozzi", "Seminaarimäki", "1401"),
-    Restaurant("207354", "Belvedere", "Seminaarimäki", "1404"),
-    Restaurant("207483", "Cafe Syke", "Seminaarimäki", "1405"),
-    Restaurant("207190", "Uno", "Ruusupuisto", "1414"),
-    Restaurant("207103", "Ylistö", "Ylistönrinne", "1403"),
-    Restaurant("207038", "Cafe Kvarkki", "Ylistönrinne", "140301"),
-    Restaurant("206838", "Rentukka", "Kortepohja", "1416"),
-    Restaurant("206878", "Amanda", "Normaalikoulu", "1411"),
-]
-
-
-async def fetch_lunch_time(session: aiohttp.ClientSession, restaurant: Restaurant, date: str) -> str:
-    """Fetch lunch time from the alternative API."""
-    if not restaurant.costNumber:
-        return ""
-
-    url = "https://www.semma.fi/modules/json/json/Index"
-    params = {"costNumber": restaurant.costNumber, "language": "en"}
-    
+async def get_location_name(lat: float, lon: float, session: aiohttp.ClientSession) -> str:
+    """Get location name from coordinates using OpenStreetMap."""
+    url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
     try:
-        async with session.get(url, params=params) as response:
-            response.raise_for_status()
-            data = await response.json()
-            
-            target_date = datetime.strptime(date, "%Y-%m-%d").date()
-            for menu_day in data.get("MenusForDays", []):
-                menu_date = datetime.strptime(menu_day["Date"][:10], "%Y-%m-%d").date()
-                if menu_date == target_date:
-                    return menu_day.get("LunchTime", "")
-    except (aiohttp.ClientError, json.JSONDecodeError, KeyError, ValueError) as e:
-        logger.error(f"Error fetching lunch time for {restaurant.name}: {str(e)}")
-    
+        async with session.get(url) as response:
+            if response.status == 200:
+                data = await response.json()
+                address = data.get('address', {})
+                return address.get('suburb') or address.get('neighbourhood') or ""
+    except Exception as e:
+        logger.error(f"Error fetching location name: {e}")
     return ""
 
-async def fetch_menu(
-    session: aiohttp.ClientSession,
-    restaurant: Restaurant,
-    date: str
-) -> Dict[str, Any]:
-    """Fetch menu data from a restaurant using the new Semma API."""
-    url = "https://www.semma.fi/api/restaurant/menu/day"
-    params = {
-        "date": date,
-        "language": "en",
-        "onlyPublishedMenu": "true",
-        "restaurantPageId": restaurant.id
-    }
-    
+async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
+    """Fetch menus from the JYU API."""
     try:
-        async with session.get(url, params=params) as response:
+        async with session.get(LUNCHES_API) as response:
             response.raise_for_status()
             data = await response.json()
-            
-            if not data or "LunchMenu" not in data or not data["LunchMenu"]:
-                return None
-            
-            lunch_menu = data["LunchMenu"]
-            
-            lunch_time = await fetch_lunch_time(session, restaurant, date)
-            
-            return {
-                "restaurant_name": f"{restaurant.name} ({restaurant.location})",
-                "menu": {
-                    "lunch_time": lunch_time,
-                    "set_menus": [
-                        create_set_menu(menu) for menu in lunch_menu["SetMenus"]
-                    ]
-                }
-            }
-    except (aiohttp.ClientError, json.JSONDecodeError) as e:
-        logger.error(f"Error fetching menu for {restaurant.name}: {str(e)}")
+            return data.get("results", {}).get("en", [])
+    except Exception as e:
+        logger.error(f"Error fetching menus: {e}")
+        return []
+
+def get_most_common_price(items: List[List[Dict]]) -> Optional[str]:
+    """Find the most common price in the menu items."""
+    price_counts = {}
+    for item_group in items:
+        for item in item_group:
+            price = item.get('price', '').strip()
+            if price:
+                price_counts[price] = price_counts.get(price, 0) + 1
+    
+    if not price_counts:
+        return None
+    
+    return max(price_counts.items(), key=lambda x: x[1])[0]
+
+def format_menu_item(item: Dict, seen_items: set, common_price: str) -> Optional[str]:
+    """Format a single menu item and track duplicates."""
+    name = item.get("name", "").strip()
+    if not name or name in seen_items:
+        return None
+    
+    price = item.get('price', '').strip()
+    if price and price != common_price:
+        return None
+    
+    seen_items.add(name)
+    return name
+
+async def format_restaurant_menu(restaurant: Dict, diets: Set[str], session: aiohttp.ClientSession) -> Optional[str]:
+    """Format a restaurant's menu items."""
+    name = restaurant.get("name", "").strip()
+    location = restaurant.get("location", {})
+    items = restaurant.get("items", [])
+    
+    if not name or not items:
         return None
 
+    location_name = ""
+    if location.get("lat") and location.get("lon"):
+        osm_location = await get_location_name(location["lat"], location["lon"], session)
+        if osm_location:
+            location_name = f" ({osm_location})"
 
-def create_set_menu(menu: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "name": menu["Name"].strip(),
-        "price": menu["Price"],
-        "components": [create_meal_component(meal) for meal in menu["Meals"]],
-    }
+    seen_items = set()
+    menu_items = []
+    
+    common_price = get_most_common_price(items)
 
+    for item_group in items:
+        filtered_items = []
+        for item in item_group:
+            item_diets = {d.upper() for d in item.get("diets", [])}
+            if all(diet.upper() in item_diets for diet in diets):
+                formatted_item = format_menu_item(item, seen_items, common_price)
+                if formatted_item:
+                    filtered_items.append(formatted_item)
+        
+        if filtered_items:
+            menu_items.extend(filtered_items)
 
-def create_meal_component(meal: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "name": meal["Name"].strip(),
-        "is_vegan": any("veg" in diet.lower() for diet in meal.get("Diets", [])),
-    }
+    if not menu_items:
+        return None
 
-
-def format_menu_message(menu_data: Dict[str, Any]) -> str:
-    """Format menu data into readable messages, returning vegan only lunch options."""
-    if not menu_data or not menu_data.get("menu"):
-        return ""
-
-    restaurant_name = menu_data["restaurant_name"]
-    today_menu = menu_data["menu"]
-
-    if not today_menu or not today_menu["set_menus"]:
-        return ""
-
-    vegan_parts = []
-    if any(menu["set_menus"] for menu in [today_menu]):
-        vegan_parts = []
-        if today_menu["lunch_time"]:
-            vegan_parts.append(f"⏰ {today_menu['lunch_time']}\n")
-
-        for menu in today_menu["set_menus"]:
-            if not menu.get("components") or "lunch" not in menu["name"].lower():
-                continue
-
-            # Get vegan components
-            vegan_components = [
-                comp["name"] for comp in menu["components"] if comp["is_vegan"]
-            ]
-
-            if vegan_components:
-                menu_name = menu["name"]
-                price = menu["price"]
-                price_str = f"\n_({price})_" if price else ""
-                components_str = "\n• ".join(vegan_components)
-                vegan_parts.append(f"*{menu_name}*{price_str}\n• {components_str}\n")
-
-    return f"🍽️ *{restaurant_name}*\n" + "\n".join(vegan_parts) if vegan_parts else ""
-
+    opening_hours = restaurant.get('opening_hours', '')
+    price_time = f"⏰ {opening_hours} 💰 _{common_price}_\n" if opening_hours and common_price else ""
+    menu_text = "\n• ".join(menu_items)
+    
+    return f"🍽️ *{name}{location_name}*\n{price_time}• {menu_text}\n"
 
 async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> None:
     """Safely send message in chunks to Telegram."""
@@ -178,21 +132,20 @@ async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> Non
             logger.error(f"Error sending message to Telegram: {str(e)}")
             logger.error(f"Problematic chunk: {chunk}")
 
-
-async def get_chefs_choice(vegan_menus: str) -> str:
-    """Use Groq API to analyze vegan menus and select the best option."""
+async def get_chefs_choice(diet_menus: str) -> str:
+    """Use Groq API to analyze menus and select the best option."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    prompt = f"""{vegan_menus}\n\nAnalyze the menu options and select the most appealing restaurant menu from those. Return ONLY "🍽️ restaurant name" followed by its menu EXACTLY as formatted in the input. After the menu write "💬 Comment:" and one sentence about the main dish from the menu you chose for those who don't know it. Make the comment italic using underscores. Don't add any other explanation or commentary."""
+    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most appealing restaurant menu from those. Return ONLY "🍽️ restaurant name" followed by its menu EXACTLY as formatted in the input. After the menu write "💬 Comment:" and one sentence about the main dish from the menu you chose for those who don't know it. Make the comment italic using underscores. Don't add any other explanation or commentary."""
 
     data = {
         "messages": [{"role": "user", "content": prompt}],
         "model": "llama-3.1-70b-versatile",
-        "temperature": 0.4,
+        "temperature": 0.5,
     }
 
     try:
@@ -200,75 +153,56 @@ async def get_chefs_choice(vegan_menus: str) -> str:
             async with session.post(url, headers=headers, json=data) as response:
                 response.raise_for_status()
                 result = await response.json()
-                choice = result["choices"][0]["message"]["content"]
-                return choice
+                return result["choices"][0]["message"]["content"]
     except Exception as e:
-        logger.error(f"Error getting chef's choice: {str(e)}")
+        logger.error(f"Error getting chef's choice: {e}")
         return ""
 
-
-async def post_daily_menus(day_offset: int = 0, dry_run: bool = False):
-    """Fetch and post vegan restaurant menus to the Telegram channel."""
+async def post_daily_menus(diets: List[str], dry_run: bool = False):
+    """Fetch and post restaurant menus to the Telegram channel."""
     bot = Bot(TELEGRAM_BOT_TOKEN)
-    target_date = datetime.now() + timedelta(days=day_offset)
-    formatted_date_api = target_date.strftime("%Y-%m-%d")
-    formatted_date_display = target_date.strftime("%A, %B %d")
+    diets_set = set(diets)
 
     try:
         async with aiohttp.ClientSession() as session:
-            tasks = [
-                fetch_menu(session, restaurant, formatted_date_api)
-                for restaurant in RESTAURANTS
-            ]
-            menus = await asyncio.gather(*tasks)
+            restaurants = await fetch_menus(session)
+            
+            menu_parts = []
+            all_menus = []
 
-            vegan_message_parts = []
-            all_vegan_menus = []
+            for restaurant in restaurants:
+                menu = await format_restaurant_menu(restaurant, diets_set, session)
+                if menu:
+                    menu_parts.append(menu)
+                    menu_parts.append("➖" * 5 + "\n")
+                    all_menus.append(menu)
 
-            for menu_data in menus:
-                if menu_data:
-                    vegan_menu = format_menu_message(menu_data)
-                    if vegan_menu:
-                        vegan_message_parts.append(vegan_menu)
-                        vegan_message_parts.append("➖" * 5 + "\n")
-                        all_vegan_menus.append(vegan_menu)
+            if menu_parts:
+                diet_str = " & ".join(diets)
+                header = f"🌱 *{diet_str} Menu Today*\n\n"
+                full_message = header + "".join(menu_parts)
 
-            if vegan_message_parts:
-                vegan_header = f"🌱 *{formatted_date_display}*\n\n"
-                vegan_full_message = vegan_header + "".join(vegan_message_parts)
+                if not dry_run:
+                    chefs_choice = await get_chefs_choice("\n\n".join(all_menus))
+                    if chefs_choice:
+                        full_message += "\n\n👨‍🍳 *Chef's Choice of the Day*\n" + chefs_choice
 
-                chef_menu = "\n\n".join(all_vegan_menus)
-                chef_menu = re.sub(r"\s*[_\*]*\(.*\)[_*]*[^\S\r\n]*", "", chef_menu)
-
-                if dry_run:
-                    logger.info(f"[DRY RUN] Sending to chef for analysis: {chef_menu}")
-
-                chefs_choice = await get_chefs_choice(chef_menu)
-                if chefs_choice:
-                    vegan_full_message += (
-                        "\n\n👨‍🍳 *Chef's Choice of the Day*\n" + chefs_choice
-                    )
-
-                await send_message_chunks(bot, vegan_full_message, dry_run)
-                logger.info("Successfully posted vegan menu summary to channel")
+                await send_message_chunks(bot, full_message, dry_run)
+                logger.info(f"Successfully posted {diet_str} menu summary to channel")
             else:
-                logger.warning(
-                    f"No vegan options available for the specified date ({formatted_date_display})"
-                )
+                logger.warning(f"No {' & '.join(diets)} options available for today")
 
     except Exception as e:
-        logger.error(f"Error in post_daily_menus: {str(e)}")
-
+        logger.error(f"Error in post_daily_menus: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Post restaurant menus to Telegram channel"
-    )
+    parser = argparse.ArgumentParser(description="Post restaurant menus to Telegram channel")
     parser.add_argument(
-        "--days",
-        type=int,
-        default=0,
-        help="Number of days to offset from today (0 for today, 1 for tomorrow, etc.)",
+        "--diets",
+        type=str,
+        nargs="+",
+        default=["Veg"],
+        help="Diet filters to apply (e.g., Veg L G). All specified diets must be satisfied.",
     )
     parser.add_argument(
         "--dry-run",
@@ -278,7 +212,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    logger.info(
-        f"Posting menus for {args.days} days from now (dry run: {args.dry_run})"
-    )
-    asyncio.run(post_daily_menus(args.days, args.dry_run))
+    logger.info(f"Posting {' & '.join(args.diets)} menus (dry run: {args.dry_run})")
+    asyncio.run(post_daily_menus(args.diets, args.dry_run))
