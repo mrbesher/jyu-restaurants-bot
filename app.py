@@ -3,6 +3,7 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 from typing import Dict, List, Optional, Set
 
 import aiohttp
@@ -37,6 +38,20 @@ async def get_location_name(
         logger.error(f"Error fetching location name: {e}")
     return ""
 
+def normalize_diet(diet: str) -> str:
+    """Normalize diet names to handle different variations."""
+    diet_mapping = {
+        'VEG': {'VEG', 'VEGAN', 'VEGAANI', 'VEGAANINEN'},
+        'L': {'L', 'LAKTOOSITON'},
+        'G': {'G', 'GLUTEENITON'},
+        'M': {'M', 'MAIDOTON'},
+    }
+    
+    upper_diet = diet.upper()
+    for normalized, variations in diet_mapping.items():
+        if upper_diet in variations:
+            return normalized
+    return upper_diet
 
 async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
     """Fetch menus from the JYU API."""
@@ -49,6 +64,11 @@ async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
         logger.error(f"Error fetching menus: {e}")
         return []
 
+
+def is_valid_price(price: str) -> bool:
+    """Check if the price matches the expected format (e.g., 2,95 or 10,50)."""
+    price_pattern = r'\d{1,2},\d{2}'
+    return bool(re.findall(price_pattern, price.strip()))
 
 def get_most_common_price(items: List[List[Dict]]) -> Optional[str]:
     """Find the most common price in the menu items."""
@@ -106,8 +126,8 @@ async def format_restaurant_menu(
     for item_group in items:
         filtered_items = []
         for item in item_group:
-            item_diets = {d.upper() for d in item.get("diets", [])}
-            if all(diet.upper() in item_diets for diet in diets):
+            item_diets = {normalize_diet(d) for d in item.get("diets", [])}
+            if all(normalize_diet(diet) in item_diets for diet in diets):
                 formatted_item = format_menu_item(item, seen_items, common_price)
                 if formatted_item:
                     filtered_items.append(formatted_item)
@@ -119,14 +139,20 @@ async def format_restaurant_menu(
         return None
 
     opening_hours = restaurant.get("opening_hours", "")
-    price_time = (
-        f"⏰ {opening_hours} 💶 _{common_price}_\n"
-        if opening_hours and common_price
-        else ""
-    )
+    price_info = ""
+    if common_price and is_valid_price(common_price):
+        price_info = f"💶 _{common_price}_"
+    
+    time_price_info = ""
+    if opening_hours:
+        time_price_info = f"⏰ {opening_hours}"
+        if price_info:
+            time_price_info += f" {price_info}"
+    time_price_info = f"{time_price_info}\n" if time_price_info else ""
+
     menu_text = "\n• ".join(menu_items)
 
-    return f"🍽️ *{name}{location_name}*\n{price_time}• {menu_text}\n"
+    return f"🍽️ *{name}{location_name}*\n{time_price_info}• {menu_text}\n"
 
 
 async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> None:
@@ -157,7 +183,7 @@ async def get_chefs_choice(diet_menus: str) -> str:
         "Content-Type": "application/json",
     }
 
-    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most appealing restaurant menu from those. Return ONLY "🍽️ restaurant name" followed by its menu EXACTLY as formatted in the input. After the menu write "💬 Comment:" and one sentence about the main dish from the menu you chose for those who don't know it. Make the comment italic using underscores. Don't add any other explanation or commentary."""
+    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most appealing restaurant dish from those. Return ONLY "*dish name* _@ restaurant name_". After that write "💬" and one sentence about the main dish you chose for those who don't know it. Make the comment italic using underscores. Don't add any other explanation or commentary."""
 
     data = {
         "messages": [{"role": "user", "content": prompt}],
@@ -170,7 +196,7 @@ async def get_chefs_choice(diet_menus: str) -> str:
             async with session.post(url, headers=headers, json=data) as response:
                 response.raise_for_status()
                 result = await response.json()
-                return result["choices"][0]["message"]["content"]
+                return result["choices"][0]["message"]["content"].strip()
     except Exception as e:
         logger.error(f"Error getting chef's choice: {e}")
         return ""
@@ -206,7 +232,7 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False):
                     chefs_choice = await get_chefs_choice("\n\n".join(all_menus))
                     if chefs_choice:
                         full_message += (
-                            "\n\n👨‍🍳 *Chef's Choice of the Day*\n" + chefs_choice
+                            "\n\n👨‍🍳 " + chefs_choice
                         )
 
                 await send_message_chunks(bot, full_message, dry_run)
