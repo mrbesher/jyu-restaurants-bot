@@ -183,12 +183,12 @@ async def get_chefs_choice(diet_menus: str) -> str:
         "Content-Type": "application/json",
     }
 
-    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most appealing restaurant dish from those. Return ONLY "*dish name* _@ restaurant name_". After that write "💬" and one short sentence explaining what the main dish you chose is for those who don't know it. Make the comment italic using underscores. Don't add any other explanation or commentary."""
+    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most appealing restaurant dish from those. Return ONLY "*dish name* _@ restaurant name_". After that write "💬" and one short sentence explaining what the main dish you chose is for those who don't know it. Make the comment italic using ONLY underscores. Don't add any other explanation or commentary."""
 
     data = {
         "messages": [{"role": "user", "content": prompt}],
-        "model": "llama-3.1-70b-versatile",
-        "temperature": 0.5,
+        "model": "llama3-70b-8192",
+        "temperature": 0.4,
     }
 
     try:
