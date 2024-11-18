@@ -38,20 +38,22 @@ async def get_location_name(
         logger.error(f"Error fetching location name: {e}")
     return ""
 
+
 def normalize_diet(diet: str) -> str:
     """Normalize diet names to handle different variations."""
     diet_mapping = {
-        'VEG': {'VEG', 'VEGAN', 'VEGAANI', 'VEGAANINEN'},
-        'L': {'L', 'LAKTOOSITON'},
-        'G': {'G', 'GLUTEENITON'},
-        'M': {'M', 'MAIDOTON'},
+        "VEG": {"VEG", "VEGAN", "VEGAANI", "VEGAANINEN"},
+        "L": {"L", "LAKTOOSITON"},
+        "G": {"G", "GLUTEENITON"},
+        "M": {"M", "MAIDOTON"},
     }
-    
+
     upper_diet = diet.upper()
     for normalized, variations in diet_mapping.items():
         if upper_diet in variations:
             return normalized
     return upper_diet
+
 
 async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
     """Fetch menus from the JYU API."""
@@ -67,8 +69,9 @@ async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
 
 def is_valid_price(price: str) -> bool:
     """Check if the price matches the expected format (e.g., 2,95 or 10,50)."""
-    price_pattern = r'\d{1,2},\d{2}'
+    price_pattern = r"\d{1,2},\d{2}"
     return bool(re.findall(price_pattern, price.strip()))
+
 
 def get_most_common_price(items: List[List[Dict]]) -> Optional[str]:
     """Find the most common price in the menu items."""
@@ -92,7 +95,8 @@ def format_menu_item(item: Dict, seen_items: set, common_price: str) -> Optional
         return None
 
     price = item.get("price", "").strip()
-    if price and price != common_price:
+    # normalize prices (remove all spaces)
+    if price and price.replace(" ", "") != common_price.replace(" ", ""):
         return None
 
     seen_items.add(name)
@@ -142,7 +146,7 @@ async def format_restaurant_menu(
     price_info = ""
     if common_price and is_valid_price(common_price):
         price_info = f"💶 _{common_price}_"
-    
+
     time_price_info = ""
     if opening_hours:
         time_price_info = f"⏰ {opening_hours}"
@@ -231,9 +235,7 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False):
                 if not dry_run:
                     chefs_choice = await get_chefs_choice("\n\n".join(all_menus))
                     if chefs_choice:
-                        full_message += (
-                            "\n\n👨‍🍳 " + chefs_choice
-                        )
+                        full_message += "\n\n👨‍🍳 " + chefs_choice
 
                 await send_message_chunks(bot, full_message, dry_run)
                 logger.info(f"Successfully posted {diet_str} menu summary to channel")
