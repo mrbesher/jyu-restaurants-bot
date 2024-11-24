@@ -2,7 +2,7 @@ name: Post Daily Menus to Telegram
 
 on:
   schedule:
-    - cron: '30 7 * * *'
+    - cron: '30 7 * * 1-5'
 
   workflow_dispatch: # allows manual run
 
