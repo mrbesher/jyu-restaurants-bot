@@ -124,20 +124,15 @@ async def format_restaurant_menu(
 
     seen_items = set()
     menu_items = []
-
     common_price = get_most_common_price(items)
 
     for item_group in items:
-        filtered_items = []
         for item in item_group:
             item_diets = {normalize_diet(d) for d in item.get("diets", [])}
             if all(normalize_diet(diet) in item_diets for diet in diets):
                 formatted_item = format_menu_item(item, seen_items, common_price)
                 if formatted_item:
-                    filtered_items.append(formatted_item)
-
-        if filtered_items:
-            menu_items.extend(filtered_items)
+                    menu_items.append(formatted_item)
 
     if not menu_items:
         return None
