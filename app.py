@@ -186,8 +186,7 @@ async def get_chefs_choice(diet_menus: str) -> str:
 
     data = {
         "messages": [{"role": "user", "content": prompt}],
-        "model": "llama3-70b-8192",
-        "temperature": 0.4,
+        "model": "qwen/qwen3-32b",
     }
 
     try:
