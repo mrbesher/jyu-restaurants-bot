@@ -23,6 +23,10 @@ CHANNEL_ID = "@jyu_yliopiston_ravintolat"
 LUNCHES_API = "https://jybar.app.jyu.fi/api/2/lunches"
 
 
+def strip_html_tags(text: str) -> str:
+    return re.sub(r"<[^>]*>.*?</[^>]*>|<[^>]+>", "", text, flags=re.DOTALL).strip()
+
+
 async def get_location_name(
     lat: float, lon: float, session: aiohttp.ClientSession
 ) -> str:
@@ -228,6 +232,7 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False):
 
                 if not dry_run:
                     chefs_choice = await get_chefs_choice("\n\n".join(all_menus))
+                    chefs_choice = strip_html_tags(chefs_choice)
                     if chefs_choice:
                         full_message += "\n\n👨‍🍳 " + chefs_choice
 
