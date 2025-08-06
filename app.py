@@ -4,6 +4,7 @@ import datetime
 import logging
 import os
 import re
+from collections import Counter
 from typing import Dict, List, Optional, Set
 
 import aiohttp
@@ -78,18 +79,23 @@ def is_valid_price(price: str) -> bool:
 
 
 def get_most_common_price(items: List[List[Dict]]) -> Optional[str]:
-    """Find the most common price in the menu items."""
-    price_counts = {}
-    for item_group in items:
-        for item in item_group:
-            price = item.get("price", "").strip()
-            if price:
-                price_counts[price] = price_counts.get(price, 0) + 1
+    """
+    Find the most common price in the menu items, ignoring whitespace.
+    """
+    all_prices = [
+        item.get("price", "").strip()
+        for item_group in items
+        for item in item_group
+        if item.get("price", "").strip()
+    ]
 
-    if not price_counts:
+    if not all_prices:
         return None
 
-    return max(price_counts.items(), key=lambda x: x[1])[0]
+    price_counts = Counter(p.replace(" ", "") for p in all_prices)
+    most_common_normalized = price_counts.most_common(1)[0][0]
+
+    return next(p for p in all_prices if p.replace(" ", "") == most_common_normalized)
 
 
 def format_menu_item(item: Dict, seen_items: set, common_price: str) -> Optional[str]:
