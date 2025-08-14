@@ -2,7 +2,7 @@ name: Post Daily Menus to Telegram
 
 on:
   schedule:
-    - cron: '00 7 * * 1-5'
+    - cron: "00 7 * * 1-5"
 
   workflow_dispatch: # allows manual run
 
@@ -17,7 +17,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: "3.x"
 
       - name: Install dependencies
         run: |
@@ -30,3 +30,4 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           python app.py
+          python halal_app.py
