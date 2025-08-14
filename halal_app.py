@@ -178,8 +178,7 @@ def build_fish_filter_prompt(candidates: List[Dict[str, Any]]) -> str:
     return f"""
 You are filtering dishes for a Halal-friendly list.
 
-ALLOW only dishes that contain fish or seafood and no other meat.
-Dairy/eggs are fine. "Veg" means vegan (no fish/meat).
+ALLOW only dishes that contain dairy/eggs, fish or seafood and no other meat (e.g. chicken, beef, pork).
 If ingredients missing, deduce from name.
 Diets legend: {diets_legend}
 
