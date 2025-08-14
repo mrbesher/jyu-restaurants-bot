@@ -1,20 +1,4 @@
 #!/usr/bin/env python3
-"""
-Halal Food Bot for JYU restaurants.
-
-Rules:
-- Always include ALL Veg dishes.
-- Additionally include ONLY non-Veg dishes that:
-  (1) match the most common price for their restaurant, and
-  (2) contain fish/seafood but NO other meat — decided by an LLM using name+diets+ingredients.
-
-Two LLM calls:
-1) Filter candidates to fish-only (no other meat), returning {id: allow, ...}.
-2) Pick the single tastiest dish from the final list (Veg + allowed fish) for a short highlight.
-
-Channel: @jyu_restaurant_test
-"""
-
 import argparse
 import asyncio
 import datetime
@@ -75,6 +59,32 @@ CHEFS_CHOICE_SCHEMA = {
         "required": ["dish", "restaurant", "reason"],
     },
 }
+
+TRANSLATION_SCHEMA = {
+    "name": "translation_response",
+    "strict": "true",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "translations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "original": {"type": "string"},
+                        "translated": {"type": "string"},
+                    },
+                    "required": ["original", "translated"],
+                },
+            }
+        },
+        "required": ["translations"],
+    },
+}
+
+
+def has_non_english_chars(text: str) -> bool:
+    return bool(re.search(r"[^\x00-\x7F]", text))
 
 
 def strip_html_tags(text: str) -> str:
@@ -168,6 +178,53 @@ async def llm_chat_json(
         resp.raise_for_status()
         data = await resp.json()
         return data["choices"][0]["message"]["content"]
+
+
+async def translate_dishes(
+    session: aiohttp.ClientSession, dishes_by_restaurant: Dict[str, List[str]]
+) -> Dict[str, str]:
+    """Translate non-English dish names to English."""
+    # Collect all dishes from restaurants that have non-English dishes
+    all_dishes_to_translate = []
+
+    for restaurant, dishes in dishes_by_restaurant.items():
+        has_non_english = any(has_non_english_chars(dish) for dish in dishes)
+        if has_non_english:
+            all_dishes_to_translate.extend(dishes)
+
+    if not all_dishes_to_translate:
+        return {}
+
+    unique_dishes = list(dict.fromkeys(all_dishes_to_translate))
+
+    prompt = f"""
+Translate the following dish names to English. If a dish name is already in English, return it exactly as is. Keep translations concise and food-appropriate.
+
+Dishes to translate:
+{json.dumps(unique_dishes, ensure_ascii=False)}
+
+Return JSON with original and translated versions for each dish.
+"""
+
+    try:
+        content = await llm_chat_json(
+            session, [{"role": "user", "content": prompt}], TRANSLATION_SCHEMA
+        )
+        content = strip_html_tags(content).strip()
+
+        obj = json.loads(content)
+        translations = {}
+
+        for item in obj.get("translations", []):
+            original = item.get("original", "")
+            translated = item.get("translated", "")
+            if original and translated:
+                translations[original] = translated
+
+        return translations
+    except Exception as e:
+        log.error(f"Error translating dishes: {e}")
+        return {}
 
 
 def build_fish_filter_prompt(candidates: List[Dict[str, Any]]) -> str:
@@ -276,14 +333,19 @@ async def get_chefs_choice(
 
 
 async def format_restaurant_menu(
-    restaurant: Dict, allowed_fish: Set[str], session: aiohttp.ClientSession
-) -> Optional[str]:
+    restaurant: Dict,
+    allowed_fish: Set[str],
+    session: aiohttp.ClientSession,
+    translations: Dict[str, str] = None,
+) -> Tuple[Optional[str], List[str]]:
+    """Format restaurant menu and return both formatted text and list of dishes."""
     name = restaurant.get("name", "").strip()
     location = restaurant.get("location", {})
     items = restaurant.get("items", [])
+    translations = translations or {}
 
     if not name or not items:
-        return None
+        return None, []
 
     location_name = ""
     if location.get("lat") and location.get("lon"):
@@ -295,6 +357,7 @@ async def format_restaurant_menu(
 
     seen_items = set()
     menu_items = []
+    dish_names = []
     common_price = get_most_common_price(items)
 
     for item_group in items:
@@ -316,10 +379,13 @@ async def format_restaurant_menu(
                         continue
 
                 seen_items.add(item_name)
-                menu_items.append(item_name)
+                # Use translated name if available
+                display_name = translations.get(item_name, item_name)
+                menu_items.append(display_name)
+                dish_names.append(item_name)  # Keep original for translation detection
 
     if not menu_items:
-        return None
+        return None, []
 
     opening_hours = restaurant.get("opening_hours", "")
     price_info = ""
@@ -335,7 +401,8 @@ async def format_restaurant_menu(
 
     menu_text = "\n• ".join(menu_items)
 
-    return f"🍽️ *{name}{location_name}*\n{time_price_info}• {menu_text}\n"
+    formatted_menu = f"🍽️ *{name}{location_name}*\n{time_price_info}• {menu_text}\n"
+    return formatted_menu, dish_names
 
 
 async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> None:
@@ -415,7 +482,24 @@ async def build_and_post(dry_run: bool = False) -> None:
                         candidate["name"]
                     )
 
-            # Format menus
+            # First pass: collect all dishes by restaurant for translation detection
+            dishes_by_restaurant = {}
+            for restaurant in restaurants:
+                name = restaurant.get("name", "").strip()
+                if not name:
+                    continue
+
+                allowed_fish = allowed_fish_by_restaurant[name]
+                _, dish_names = await format_restaurant_menu(
+                    restaurant, allowed_fish, session
+                )
+                if dish_names:
+                    dishes_by_restaurant[name] = dish_names
+
+            # Translate dishes if needed
+            translations = await translate_dishes(session, dishes_by_restaurant)
+
+            # Second pass: format menus with translations
             menu_parts = []
             all_dishes = []
 
@@ -425,13 +509,15 @@ async def build_and_post(dry_run: bool = False) -> None:
                     continue
 
                 allowed_fish = allowed_fish_by_restaurant[name]
-                menu = await format_restaurant_menu(restaurant, allowed_fish, session)
+                menu, dish_names = await format_restaurant_menu(
+                    restaurant, allowed_fish, session, translations
+                )
 
                 if menu:
                     menu_parts.append(menu)
                     menu_parts.append("➖" * 5 + "\n")
 
-                    # Collect dishes for chef's choice
+                    # Collect dishes for chef's choice (use translated names)
                     items = restaurant.get("items", [])
                     for group in items:
                         for item in group:
@@ -440,7 +526,8 @@ async def build_and_post(dry_run: bool = False) -> None:
                                 is_veg(item.get("diets", []))
                                 or item_name in allowed_fish
                             ):
-                                all_dishes.append((item_name, name))
+                                display_name = translations.get(item_name, item_name)
+                                all_dishes.append((display_name, name))
 
             if menu_parts:
                 current_date = datetime.date.today()
