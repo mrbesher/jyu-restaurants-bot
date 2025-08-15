@@ -373,7 +373,7 @@ async def format_restaurant_menu(
             if is_veg(item_diets) or item_name in allowed_fish:
                 # For non-veg items, check price matches
                 if not is_veg(item_diets):
-                    if not common_price or item_price.replace(
+                    if common_price and item_price.replace(
                         " ", ""
                     ) != common_price.replace(" ", ""):
                         continue
@@ -458,17 +458,19 @@ async def build_and_post(dry_run: bool = False) -> None:
                         ingredients = item.get("ingredients", "").strip()
 
                         # Only consider non-veg items with matching price
-                        if not is_veg(diets) and common_price:
-                            if price.replace(" ", "") == common_price.replace(" ", ""):
-                                candidates.append(
-                                    {
-                                        "id": f"{name}|{item_index}",
-                                        "restaurant": name,
-                                        "name": item_name,
-                                        "diets": diets,
-                                        "ingredients": ingredients,
-                                    }
-                                )
+                        if not is_veg(diets) and (
+                            not common_price
+                            or price.replace(" ", "") == common_price.replace(" ", "")
+                        ):
+                            candidates.append(
+                                {
+                                    "id": f"{name}|{item_index}",
+                                    "restaurant": name,
+                                    "name": item_name,
+                                    "diets": diets,
+                                    "ingredients": ingredients,
+                                }
+                            )
                         item_index += 1
 
             # Filter fish-only dishes
