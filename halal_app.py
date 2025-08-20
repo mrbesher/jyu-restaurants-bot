@@ -83,6 +83,30 @@ TRANSLATION_SCHEMA = {
 }
 
 
+def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0):
+    def decorator(func):
+        async def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return await func(*args, **kwargs)
+                except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+                    last_exception = e
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        log.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                        await asyncio.sleep(delay)
+                    continue
+                except Exception as e:
+                    log.error(f"Non-retryable error in {func.__name__}: {e}")
+                    raise
+            
+            log.error(f"All {max_retries} attempts failed for {func.__name__}")
+            raise last_exception
+        return wrapper
+    return decorator
+
+
 def has_non_english_chars(text: str) -> bool:
     return bool(re.search(r"[^\x00-\x7F]", text))
 
@@ -132,32 +156,28 @@ def get_most_common_price(items: List[List[Dict]]) -> Optional[str]:
     return next(p for p in all_prices if p.replace(" ", "") == most_common_normalized)
 
 
+@retry_with_backoff(max_retries=2)
 async def get_location_name(
     lat: float, lon: float, session: aiohttp.ClientSession
 ) -> str:
     url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
-    try:
-        async with session.get(url) as response:
-            if response.status == 200:
-                data = await response.json()
-                address = data.get("address", {})
-                return address.get("suburb") or address.get("neighbourhood") or ""
-    except Exception as e:
-        log.error(f"Error fetching location name: {e}")
+    async with session.get(url) as response:
+        if response.status == 200:
+            data = await response.json()
+            address = data.get("address", {})
+            return address.get("suburb") or address.get("neighbourhood") or ""
     return ""
 
 
+@retry_with_backoff()
 async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
-    try:
-        async with session.get(LUNCHES_API) as response:
-            response.raise_for_status()
-            data = await response.json()
-            return data.get("results", {}).get("en", [])
-    except Exception as e:
-        log.error(f"Error fetching menus: {e}")
-        return []
+    async with session.get(LUNCHES_API) as response:
+        response.raise_for_status()
+        data = await response.json()
+        return data.get("results", {}).get("en", [])
 
 
+@retry_with_backoff()
 async def llm_chat_json(
     session: aiohttp.ClientSession,
     messages: List[Dict[str, str]],
@@ -183,8 +203,6 @@ async def llm_chat_json(
 async def translate_dishes(
     session: aiohttp.ClientSession, dishes_by_restaurant: Dict[str, List[str]]
 ) -> Dict[str, str]:
-    """Translate non-English dish names to English."""
-    # Collect all dishes from restaurants that have non-English dishes
     all_dishes_to_translate = []
 
     for restaurant, dishes in dishes_by_restaurant.items():
@@ -287,20 +305,15 @@ async def filter_fish_only(
     )
     content = strip_html_tags(content)
 
-    try:
-        arr = json.loads(content)
-        result = {}
-        candidate_ids = {c["id"] for c in candidates}
+    arr = json.loads(content)
+    result = {}
+    candidate_ids = {c["id"] for c in candidates}
 
-        for obj in arr:
-            if isinstance(obj.get("id"), str) and obj["id"] in candidate_ids:
-                result[obj["id"]] = bool(obj.get("allow", False))
+    for obj in arr:
+        if isinstance(obj.get("id"), str) and obj["id"] in candidate_ids:
+            result[obj["id"]] = bool(obj.get("allow", False))
 
-        return result
-    except Exception as e:
-        log.error("Failed to parse fish-filter JSON. Content was:\n%s", content)
-        log.exception(e)
-        return {}
+    return result
 
 
 async def get_chefs_choice(
@@ -325,11 +338,10 @@ async def get_chefs_choice(
 
         if dish and rest and reason:
             return f"*{dish}* @ _{rest}_\n💬 _{reason}_"
-
-        return ""
     except Exception as e:
         log.error("Error getting chef's choice: %s", e)
-        return ""
+    
+    return ""
 
 
 async def format_restaurant_menu(
@@ -421,134 +433,133 @@ async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> Non
                 await asyncio.sleep(0.1)
         except TelegramError as e:
             log.error(f"Error sending message to Telegram: {str(e)}")
-            log.error(f"Problematic chunk: {chunk}")
+            if "retry after" in str(e).lower():
+                retry_after = int(''.join(filter(str.isdigit, str(e))))
+                await asyncio.sleep(min(retry_after, 30))
+                try:
+                    await bot.send_message(
+                        chat_id=CHANNEL_ID, text=chunk, parse_mode="Markdown"
+                    )
+                except TelegramError:
+                    log.error(f"Failed to send chunk after retry: {chunk}")
+            else:
+                log.error(f"Problematic chunk: {chunk}")
 
 
+@retry_with_backoff()
 async def build_and_post(dry_run: bool = False) -> None:
     bot = Bot(TELEGRAM_BOT_TOKEN)
 
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30)
-        ) as session:
-            restaurants = await fetch_menus(session)
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=60)
+    ) as session:
+        restaurants = await fetch_menus(session)
 
-            # Build candidates for fish filtering
-            candidates = []
-            restaurant_prices = {}
+        candidates = []
+        restaurant_prices = {}
 
-            for restaurant in restaurants:
-                name = restaurant.get("name", "").strip()
-                if not name:
-                    continue
+        for restaurant in restaurants:
+            name = restaurant.get("name", "").strip()
+            if not name:
+                continue
+
+            items = restaurant.get("items", [])
+            common_price = get_most_common_price(items)
+            restaurant_prices[name] = common_price
+
+            item_index = 0
+            for group in items:
+                for item in group:
+                    item_name = item.get("name", "").strip()
+                    if not item_name:
+                        continue
+
+                    diets = item.get("diets", [])
+                    price = item.get("price", "").strip()
+                    ingredients = item.get("ingredients", "").strip()
+
+                    if not is_veg(diets) and (
+                        not common_price
+                        or price.replace(" ", "") == common_price.replace(" ", "")
+                    ):
+                        candidates.append(
+                            {
+                                "id": f"{name}|{item_index}",
+                                "restaurant": name,
+                                "name": item_name,
+                                "diets": diets,
+                                "ingredients": ingredients,
+                            }
+                        )
+                    item_index += 1
+
+        id_to_allow = await filter_fish_only(session, candidates)
+
+        allowed_fish_by_restaurant = defaultdict(set)
+        for candidate in candidates:
+            if id_to_allow.get(candidate["id"], False):
+                allowed_fish_by_restaurant[candidate["restaurant"]].add(
+                    candidate["name"]
+                )
+
+        dishes_by_restaurant = {}
+        for restaurant in restaurants:
+            name = restaurant.get("name", "").strip()
+            if not name:
+                continue
+
+            allowed_fish = allowed_fish_by_restaurant[name]
+            _, dish_names = await format_restaurant_menu(
+                restaurant, allowed_fish, session
+            )
+            if dish_names:
+                dishes_by_restaurant[name] = dish_names
+
+        translations = await translate_dishes(session, dishes_by_restaurant)
+
+        menu_parts = []
+        all_dishes = []
+
+        for restaurant in restaurants:
+            name = restaurant.get("name", "").strip()
+            if not name:
+                continue
+
+            allowed_fish = allowed_fish_by_restaurant[name]
+            menu, dish_names = await format_restaurant_menu(
+                restaurant, allowed_fish, session, translations
+            )
+
+            if menu:
+                menu_parts.append(menu)
+                menu_parts.append("➖" * 5 + "\n")
 
                 items = restaurant.get("items", [])
-                common_price = get_most_common_price(items)
-                restaurant_prices[name] = common_price
-
-                item_index = 0
                 for group in items:
                     for item in group:
                         item_name = item.get("name", "").strip()
-                        if not item_name:
-                            continue
-
-                        diets = item.get("diets", [])
-                        price = item.get("price", "").strip()
-                        ingredients = item.get("ingredients", "").strip()
-
-                        # Only consider non-veg items with matching price
-                        if not is_veg(diets) and (
-                            not common_price
-                            or price.replace(" ", "") == common_price.replace(" ", "")
+                        if item_name and (
+                            is_veg(item.get("diets", []))
+                            or item_name in allowed_fish
                         ):
-                            candidates.append(
-                                {
-                                    "id": f"{name}|{item_index}",
-                                    "restaurant": name,
-                                    "name": item_name,
-                                    "diets": diets,
-                                    "ingredients": ingredients,
-                                }
-                            )
-                        item_index += 1
+                            display_name = translations.get(item_name, item_name)
+                            all_dishes.append((display_name, name))
 
-            # Filter fish-only dishes
-            id_to_allow = await filter_fish_only(session, candidates)
+        if menu_parts:
+            current_date = datetime.date.today()
+            formatted_date = current_date.strftime("%A, %B %d")
+            header = f"🌱🐟 *Halal Menu for {formatted_date}*\n\n"
+            full_message = header + "".join(menu_parts)
 
-            # Build allowed fish set by restaurant
-            allowed_fish_by_restaurant = defaultdict(set)
-            for candidate in candidates:
-                if id_to_allow.get(candidate["id"], False):
-                    allowed_fish_by_restaurant[candidate["restaurant"]].add(
-                        candidate["name"]
-                    )
+            if not dry_run:
+                chefs_choice = await get_chefs_choice(session, all_dishes)
+                if chefs_choice:
+                    full_message += "\n\n👨‍🍳 " + chefs_choice
 
-            # First pass: collect all dishes by restaurant for translation detection
-            dishes_by_restaurant = {}
-            for restaurant in restaurants:
-                name = restaurant.get("name", "").strip()
-                if not name:
-                    continue
-
-                allowed_fish = allowed_fish_by_restaurant[name]
-                _, dish_names = await format_restaurant_menu(
-                    restaurant, allowed_fish, session
-                )
-                if dish_names:
-                    dishes_by_restaurant[name] = dish_names
-
-            # Translate dishes if needed
-            translations = await translate_dishes(session, dishes_by_restaurant)
-
-            # Second pass: format menus with translations
-            menu_parts = []
-            all_dishes = []
-
-            for restaurant in restaurants:
-                name = restaurant.get("name", "").strip()
-                if not name:
-                    continue
-
-                allowed_fish = allowed_fish_by_restaurant[name]
-                menu, dish_names = await format_restaurant_menu(
-                    restaurant, allowed_fish, session, translations
-                )
-
-                if menu:
-                    menu_parts.append(menu)
-                    menu_parts.append("➖" * 5 + "\n")
-
-                    # Collect dishes for chef's choice (use translated names)
-                    items = restaurant.get("items", [])
-                    for group in items:
-                        for item in group:
-                            item_name = item.get("name", "").strip()
-                            if item_name and (
-                                is_veg(item.get("diets", []))
-                                or item_name in allowed_fish
-                            ):
-                                display_name = translations.get(item_name, item_name)
-                                all_dishes.append((display_name, name))
-
-            if menu_parts:
-                current_date = datetime.date.today()
-                formatted_date = current_date.strftime("%A, %B %d")
-                header = f"🌱🐟 *Halal Menu for {formatted_date}*\n\n"
-                full_message = header + "".join(menu_parts)
-
-                if not dry_run:
-                    chefs_choice = await get_chefs_choice(session, all_dishes)
-                    if chefs_choice:
-                        full_message += "\n\n👨‍🍳 " + chefs_choice
-
-                await send_message_chunks(bot, full_message, dry_run)
-                log.info("Successfully posted Halal menu summary to channel")
-            else:
-                log.warning("No Halal options available for today")
-
-    except Exception as e:
-        log.error(f"Error in build_and_post: {e}")
+            await send_message_chunks(bot, full_message, dry_run)
+            log.info("Successfully posted Halal menu summary to channel")
+        else:
+            log.warning("No Halal options available for today")
 
 
 if __name__ == "__main__":
