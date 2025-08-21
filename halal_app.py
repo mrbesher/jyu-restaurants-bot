@@ -29,6 +29,9 @@ LLM_CHAT_URL = (
 )
 LLM_MODEL = "gemini-2.5-flash"
 
+# Restaurant names to skip (case-insensitive)
+SKIP_RESTAURANTS = ["tilia", "normaalikoulu"]
+
 FISH_FILTER_SCHEMA = {
     "name": "fish_filter_response",
     "strict": "true",
@@ -128,6 +131,15 @@ def normalize_diet(diet: str) -> str:
         if any(upper_diet.startswith(v) for v in variations):
             return normalized
     return upper_diet
+
+
+def should_skip_restaurant(restaurant_name: str) -> bool:
+    """Check if restaurant should be skipped based on SKIP_RESTAURANTS list."""
+    if not restaurant_name:
+        return True
+    
+    name_lower = restaurant_name.lower()
+    return any(skip_name in name_lower for skip_name in SKIP_RESTAURANTS)
 
 
 def is_veg(diets: List[str]) -> bool:
@@ -460,7 +472,7 @@ async def build_and_post(dry_run: bool = False) -> None:
 
         for restaurant in restaurants:
             name = restaurant.get("name", "").strip()
-            if not name:
+            if not name or should_skip_restaurant(name):
                 continue
 
             items = restaurant.get("items", [])
@@ -505,7 +517,7 @@ async def build_and_post(dry_run: bool = False) -> None:
         dishes_by_restaurant = {}
         for restaurant in restaurants:
             name = restaurant.get("name", "").strip()
-            if not name:
+            if not name or should_skip_restaurant(name):
                 continue
 
             allowed_fish = allowed_fish_by_restaurant[name]
@@ -522,7 +534,7 @@ async def build_and_post(dry_run: bool = False) -> None:
 
         for restaurant in restaurants:
             name = restaurant.get("name", "").strip()
-            if not name:
+            if not name or should_skip_restaurant(name):
                 continue
 
             allowed_fish = allowed_fish_by_restaurant[name]

@@ -23,9 +23,21 @@ GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 CHANNEL_ID = "@jyu_yliopiston_ravintolat"
 LUNCHES_API = "https://jybar.app.jyu.fi/api/2/lunches"
 
+# Restaurant names to skip (case-insensitive)
+SKIP_RESTAURANTS = ["tilia", "normaalikoulu"]
+
 
 def strip_html_tags(text: str) -> str:
     return re.sub(r"<[^>]*>.*?</[^>]*>|<[^>]+>", "", text, flags=re.DOTALL).strip()
+
+
+def should_skip_restaurant(restaurant_name: str) -> bool:
+    """Check if restaurant should be skipped based on SKIP_RESTAURANTS list."""
+    if not restaurant_name:
+        return True
+    
+    name_lower = restaurant_name.lower()
+    return any(skip_name in name_lower for skip_name in SKIP_RESTAURANTS)
 
 
 async def get_location_name(
@@ -121,7 +133,7 @@ async def format_restaurant_menu(
     location = restaurant.get("location", {})
     items = restaurant.get("items", [])
 
-    if not name or not items:
+    if not name or not items or should_skip_restaurant(name):
         return None
 
     location_name = ""
@@ -148,16 +160,9 @@ async def format_restaurant_menu(
         return None
 
     opening_hours = restaurant.get("opening_hours", "")
-    price_info = ""
-    if common_price and is_valid_price(common_price):
-        price_info = f"💶 _{common_price}_"
-
     time_price_info = ""
     if opening_hours:
-        time_price_info = f"⏰ {opening_hours}"
-        if price_info:
-            time_price_info += f" {price_info}"
-    time_price_info = f"{time_price_info}\n" if time_price_info else ""
+        time_price_info = f"⏰ {opening_hours}\n"
 
     menu_text = "\n• ".join(menu_items)
 
