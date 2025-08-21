@@ -467,17 +467,18 @@ async def build_and_post(dry_run: bool = False) -> None:
     ) as session:
         restaurants = await fetch_menus(session)
 
+        # Process all restaurants in a single pass to collect candidates and filter valid ones
         candidates = []
-        restaurant_prices = {}
+        valid_restaurants = []
 
         for restaurant in restaurants:
             name = restaurant.get("name", "").strip()
             if not name or should_skip_restaurant(name):
                 continue
 
+            valid_restaurants.append(restaurant)
             items = restaurant.get("items", [])
             common_price = get_most_common_price(items)
-            restaurant_prices[name] = common_price
 
             item_index = 0
             for group in items:
@@ -505,8 +506,8 @@ async def build_and_post(dry_run: bool = False) -> None:
                         )
                     item_index += 1
 
+        # Filter fish dishes and build allowed fish mapping
         id_to_allow = await filter_fish_only(session, candidates)
-
         allowed_fish_by_restaurant = defaultdict(set)
         for candidate in candidates:
             if id_to_allow.get(candidate["id"], False):
@@ -514,38 +515,28 @@ async def build_and_post(dry_run: bool = False) -> None:
                     candidate["name"]
                 )
 
+        # Build dishes for translation and final menu in a single pass
         dishes_by_restaurant = {}
-        for restaurant in restaurants:
-            name = restaurant.get("name", "").strip()
-            if not name or should_skip_restaurant(name):
-                continue
-
-            allowed_fish = allowed_fish_by_restaurant[name]
-            _, dish_names = await format_restaurant_menu(
-                restaurant, allowed_fish, session
-            )
-            if dish_names:
-                dishes_by_restaurant[name] = dish_names
-
-        translations = await translate_dishes(session, dishes_by_restaurant)
-
         menu_parts = []
         all_dishes = []
 
-        for restaurant in restaurants:
+        for restaurant in valid_restaurants:
             name = restaurant.get("name", "").strip()
-            if not name or should_skip_restaurant(name):
-                continue
-
             allowed_fish = allowed_fish_by_restaurant[name]
+            
+            # Get both menu and dish names for this restaurant
             menu, dish_names = await format_restaurant_menu(
-                restaurant, allowed_fish, session, translations
+                restaurant, allowed_fish, session
             )
-
+            
+            if dish_names:
+                dishes_by_restaurant[name] = dish_names
+            
             if menu:
                 menu_parts.append(menu)
                 menu_parts.append("➖" * 5 + "\n")
 
+                # Collect all dishes for chef's choice directly from items
                 items = restaurant.get("items", [])
                 for group in items:
                     for item in group:
@@ -554,14 +545,33 @@ async def build_and_post(dry_run: bool = False) -> None:
                             is_veg(item.get("diets", []))
                             or item_name in allowed_fish
                         ):
-                            display_name = translations.get(item_name, item_name)
-                            all_dishes.append((display_name, name))
+                            all_dishes.append((item_name, name))
+
+        # Get translations and update all_dishes with translated names
+        translations = await translate_dishes(session, dishes_by_restaurant)
+        all_dishes = [
+            (translations.get(dish_name, dish_name), restaurant)
+            for dish_name, restaurant in all_dishes
+        ]
 
         if menu_parts:
             current_date = datetime.date.today()
             formatted_date = current_date.strftime("%A, %B %d")
             header = f"🌱🐟 *Halal Menu for {formatted_date}*\n\n"
-            full_message = header + "".join(menu_parts)
+            
+            # Re-format menus with translations
+            menu_parts_translated = []
+            for restaurant in valid_restaurants:
+                name = restaurant.get("name", "").strip()
+                allowed_fish = allowed_fish_by_restaurant[name]
+                menu, _ = await format_restaurant_menu(
+                    restaurant, allowed_fish, session, translations
+                )
+                if menu:
+                    menu_parts_translated.append(menu)
+                    menu_parts_translated.append("➖" * 5 + "\n")
+
+            full_message = header + "".join(menu_parts_translated)
 
             if not dry_run:
                 chefs_choice = await get_chefs_choice(session, all_dishes)
