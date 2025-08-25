@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import datetime
+import json
 import logging
 import os
 import re
@@ -19,12 +20,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 CHANNEL_ID = "@jyu_yliopiston_ravintolat"
 LUNCHES_API = "https://jybar.app.jyu.fi/api/2/lunches"
 
 # Restaurant names to skip (case-insensitive)
 SKIP_RESTAURANTS = ["tilia", "normaalikoulu"]
+
+CHEFS_CHOICE_SCHEMA = {
+    "name": "chefs_choice_response",
+    "strict": "true",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "dish": {"type": "string"},
+            "restaurant": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["dish", "restaurant", "reason"],
+    },
+}
+
+CHEFS_CHOICE_SCHEMA = {
+    "name": "chefs_choice_response",
+    "strict": "true",
+    "schema": {
+        "type": "object",
+        "properties": {
+            "dish": {"type": "string"},
+            "restaurant": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["dish", "restaurant", "reason"],
+    },
+}
 
 
 def strip_html_tags(text: str) -> str:
@@ -190,18 +219,19 @@ async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> Non
 
 
 async def get_chefs_choice(diet_menus: str) -> str:
-    """Use Groq API to analyze menus and select the best option."""
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    """Use Gemini API to analyze menus and select the best option."""
+    url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {GEMINI_API_KEY}",
         "Content-Type": "application/json",
     }
 
-    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most tasty dish from those, consider what's more delicious even if not healthy necessarily. Approach from a middle-eastern perspective. Return ONLY *dish name* @ _restaurant name_ . After that write " 💬 " and one short sentence explaining what the main dish you chose is for those who don't know it. Make the comment italic using ONLY underscores. Don't add any other explanation or commentary. AGAIN the format is: *dish name* @ _restaurant name_\n💬 _short explanation_"""
+    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most tasty dish from those, consider what's more delicious even if not healthy necessarily. Approach from a middle-eastern perspective. Return JSON with dish name, restaurant name, and a short explanation of what the dish is for those who don't know it."""
 
     data = {
         "messages": [{"role": "user", "content": prompt}],
-        "model": "qwen/qwen3-32b",
+        "model": "gemini-2.5-flash",
+        "response_format": {"type": "json_schema", "json_schema": CHEFS_CHOICE_SCHEMA},
     }
 
     try:
@@ -209,7 +239,18 @@ async def get_chefs_choice(diet_menus: str) -> str:
             async with session.post(url, headers=headers, json=data) as response:
                 response.raise_for_status()
                 result = await response.json()
-                return result["choices"][0]["message"]["content"].strip()
+                content = result["choices"][0]["message"]["content"].strip()
+                content = strip_html_tags(content).strip()
+
+                obj = json.loads(content)
+                dish = obj.get("dish", "").strip()
+                rest = obj.get("restaurant", "").strip()
+                reason = obj.get("reason", "").strip()
+
+                if dish and rest and reason:
+                    return f"*{dish}* @ _{rest}_\n💬 _{reason}_"
+                
+                return ""
     except Exception as e:
         logger.error(f"Error getting chef's choice: {e}")
         return ""
@@ -243,7 +284,6 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False):
 
                 if not dry_run:
                     chefs_choice = await get_chefs_choice("\n\n".join(all_menus))
-                    chefs_choice = strip_html_tags(chefs_choice)
                     if chefs_choice:
                         full_message += "\n\n👨‍🍳 " + chefs_choice
 
