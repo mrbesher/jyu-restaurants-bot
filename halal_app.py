@@ -93,20 +93,28 @@ def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0):
             for attempt in range(max_retries):
                 try:
                     return await func(*args, **kwargs)
-                except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
+                except (
+                    aiohttp.ClientError,
+                    asyncio.TimeoutError,
+                    json.JSONDecodeError,
+                ) as e:
                     last_exception = e
                     if attempt < max_retries - 1:
-                        delay = base_delay * (2 ** attempt)
-                        log.warning(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+                        delay = base_delay * (2**attempt)
+                        log.warning(
+                            f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s..."
+                        )
                         await asyncio.sleep(delay)
                     continue
                 except Exception as e:
                     log.error(f"Non-retryable error in {func.__name__}: {e}")
                     raise
-            
+
             log.error(f"All {max_retries} attempts failed for {func.__name__}")
             raise last_exception
+
         return wrapper
+
     return decorator
 
 
@@ -137,7 +145,7 @@ def should_skip_restaurant(restaurant_name: str) -> bool:
     """Check if restaurant should be skipped based on SKIP_RESTAURANTS list."""
     if not restaurant_name:
         return True
-    
+
     name_lower = restaurant_name.lower()
     return any(skip_name in name_lower for skip_name in SKIP_RESTAURANTS)
 
@@ -352,7 +360,7 @@ async def get_chefs_choice(
             return f"*{dish}* @ _{rest}_\n💬 _{reason}_"
     except Exception as e:
         log.error("Error getting chef's choice: %s", e)
-    
+
     return ""
 
 
@@ -393,20 +401,15 @@ async def format_restaurant_menu(
             item_diets = item.get("diets", [])
             item_price = item.get("price", "").strip()
 
-            # Include if veg or if it's an allowed fish dish
-            if is_veg(item_diets) or item_name in allowed_fish:
-                # For non-veg items, check price matches
-                if not is_veg(item_diets):
-                    if common_price and item_price.replace(
-                        " ", ""
-                    ) != common_price.replace(" ", ""):
-                        continue
+            if common_price and is_valid_price(common_price):
+                if item_price.replace(" ", "") != common_price.replace(" ", ""):
+                    continue
 
+            if is_veg(item_diets) or item_name in allowed_fish:
                 seen_items.add(item_name)
-                # Use translated name if available
                 display_name = translations.get(item_name, item_name)
                 menu_items.append(display_name)
-                dish_names.append(item_name)  # Keep original for translation detection
+                dish_names.append(item_name)
 
     if not menu_items:
         return None, []
@@ -446,7 +449,7 @@ async def send_message_chunks(bot: Bot, text: str, dry_run: bool = False) -> Non
         except TelegramError as e:
             log.error(f"Error sending message to Telegram: {str(e)}")
             if "retry after" in str(e).lower():
-                retry_after = int(''.join(filter(str.isdigit, str(e))))
+                retry_after = int("".join(filter(str.isdigit, str(e))))
                 await asyncio.sleep(min(retry_after, 30))
                 try:
                     await bot.send_message(
@@ -523,15 +526,15 @@ async def build_and_post(dry_run: bool = False) -> None:
         for restaurant in valid_restaurants:
             name = restaurant.get("name", "").strip()
             allowed_fish = allowed_fish_by_restaurant[name]
-            
+
             # Get both menu and dish names for this restaurant
             menu, dish_names = await format_restaurant_menu(
                 restaurant, allowed_fish, session
             )
-            
+
             if dish_names:
                 dishes_by_restaurant[name] = dish_names
-            
+
             if menu:
                 menu_parts.append(menu)
                 menu_parts.append("➖" * 5 + "\n")
@@ -542,8 +545,7 @@ async def build_and_post(dry_run: bool = False) -> None:
                     for item in group:
                         item_name = item.get("name", "").strip()
                         if item_name and (
-                            is_veg(item.get("diets", []))
-                            or item_name in allowed_fish
+                            is_veg(item.get("diets", [])) or item_name in allowed_fish
                         ):
                             all_dishes.append((item_name, name))
 
@@ -558,7 +560,7 @@ async def build_and_post(dry_run: bool = False) -> None:
             current_date = datetime.date.today()
             formatted_date = current_date.strftime("%A, %B %d")
             header = f"🌱🐟 *Halal Menu for {formatted_date}*\n\n"
-            
+
             # Re-format menus with translations
             menu_parts_translated = []
             for restaurant in valid_restaurants:
