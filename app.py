@@ -64,7 +64,7 @@ def should_skip_restaurant(restaurant_name: str) -> bool:
     """Check if restaurant should be skipped based on SKIP_RESTAURANTS list."""
     if not restaurant_name:
         return True
-    
+
     name_lower = restaurant_name.lower()
     return any(skip_name in name_lower for skip_name in SKIP_RESTAURANTS)
 
@@ -226,7 +226,7 @@ async def get_chefs_choice(diet_menus: str) -> str:
         "Content-Type": "application/json",
     }
 
-    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most tasty dish from those, consider what's more delicious even if not healthy necessarily. Approach from a middle-eastern perspective. Return JSON with dish name, restaurant name, and a short explanation of what the dish is for those who don't know it."""
+    prompt = f"""{diet_menus}\n\nAnalyze the menu options and select the most tasty dish from those, consider what's more delicious even if not healthy necessarily. Return JSON with dish name, restaurant name, and a one sentence, very few words explanation of what the dish is for those who don't know it."""
 
     data = {
         "messages": [{"role": "user", "content": prompt}],
@@ -249,7 +249,7 @@ async def get_chefs_choice(diet_menus: str) -> str:
 
                 if dish and rest and reason:
                     return f"*{dish}* @ _{rest}_\n💬 _{reason}_"
-                
+
                 return ""
     except Exception as e:
         logger.error(f"Error getting chef's choice: {e}")
