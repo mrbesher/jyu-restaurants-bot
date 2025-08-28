@@ -155,8 +155,8 @@ def is_veg(diets: List[str]) -> bool:
 
 
 def is_valid_price(price: str) -> bool:
-    price_pattern = r"\d{1,2},\d{2}"
-    return bool(re.fullmatch(price_pattern, price.strip()))
+    price_pattern = r"\d{1,2}[\.,]\d{2}"
+    return bool(re.findall(price_pattern, price.strip()))
 
 
 def get_most_common_price(items: List[List[Dict]]) -> Optional[str]:
