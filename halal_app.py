@@ -417,6 +417,7 @@ async def format_restaurant_menu(
     opening_hours = restaurant.get("opening_hours", "")
     price_info = ""
     if common_price and is_valid_price(common_price):
+        common_price = re.sub(r"[^\d.,/]", "", common_price)
         price_info = f"💶 _{common_price}_"
 
     time_price_info = ""
