@@ -29,6 +29,13 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CHANNEL_ID: ${{ secrets.VEGAN_CHANNEL_ID }}
         run: |
           python app.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CHANNEL_ID: ${{ secrets.HALAL_CHANNEL_ID }}
+        run: |
           python halal_app.py
