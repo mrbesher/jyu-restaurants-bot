@@ -24,7 +24,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run the daily menu script
+      - name: Run diet bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -32,6 +32,8 @@ jobs:
           CHANNEL_ID: ${{ secrets.VEGAN_CHANNEL_ID }}
         run: |
           python app.py
+
+      - name: Run halal bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
