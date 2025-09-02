@@ -82,7 +82,7 @@ TRANSLATION_SCHEMA = {
 logger = logging.getLogger(__name__)
 
 
-def retry_with_backoff(max_retries: int = 3, base_delay: float = 1.0):
+def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
     """Retry decorator with exponential backoff."""
 
     def decorator(func):
@@ -152,7 +152,7 @@ def extract_prices(price_string: str) -> List[str]:
     price_pattern = r"\d{1,2}[\.,]\d{2}"
     matches = re.findall(price_pattern, price_string)
     # Sort prices numerically (cheapest first)
-    matches.sort(key=lambda p: float(p.replace(',', '.')))
+    matches.sort(key=lambda p: float(p.replace(",", ".")))
     return matches
 
 
@@ -176,7 +176,7 @@ def get_common_price(items: List[List[Dict]]) -> List[str]:
 
     # Find the most common price list
     most_common_tuple = price_list_counts.most_common(1)[0][0]
-    
+
     # Convert back to list
     return list(most_common_tuple)
 
@@ -191,7 +191,7 @@ async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
         return data.get("results", {}).get("en", [])
 
 
-@retry_with_backoff(max_retries=2)
+@retry_with_backoff()
 async def get_location_name(
     lat: float, lon: float, session: aiohttp.ClientSession
 ) -> str:
@@ -552,8 +552,7 @@ async def process_restaurants_for_halal(
                 price = item.get("price", "").strip()
 
                 if not is_veg(diets) and (
-                    not common_price
-                    or extract_prices(price) == common_price
+                    not common_price or extract_prices(price) == common_price
                 ):
                     candidates.append(
                         {

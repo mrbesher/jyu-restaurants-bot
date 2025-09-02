@@ -1,0 +1,10 @@
+[project]
+name = "jyu-restaurants-bot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp==3.10.10",
+    "python-telegram-bot==21.6",
+]
