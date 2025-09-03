@@ -39,44 +39,13 @@ async def build_and_post(dry_run: bool = False) -> None:
         menu_parts, all_dishes, allowed_fish_by_restaurant = await process_restaurants_for_halal(session)
 
         if menu_parts:
-            # Get translations for non-English dishes
-            dishes_by_restaurant = {}
-            for restaurant in allowed_fish_by_restaurant:
-                dishes_by_restaurant[restaurant] = list(allowed_fish_by_restaurant[restaurant])
-            
-            translations = await translate_dishes(session, dishes_by_restaurant)
-            
-            # Update dish names with translations
-            all_dishes = [
-                (translations.get(dish_name, dish_name), restaurant)
-                for dish_name, restaurant in all_dishes
-            ]
-
             # Format the message
             current_date = datetime.date.today()
             formatted_date = current_date.strftime("%A, %B %d")
             header = f"🌱🐟 *Halal Menu for {formatted_date}*\n\n"
-
-            # Rebuild menu with translations
-            menu_parts_translated = []
-            restaurants = await fetch_menus(session)
             
-            for restaurant in restaurants:
-                name = restaurant.get("name", "").strip()
-                allowed_fish = allowed_fish_by_restaurant.get(name, set())
-                
-                def halal_filter(item, item_diets, item_name):
-                    return is_veg(item_diets) or item_name in allowed_fish
-                
-                menu, _ = await format_restaurant_menu(
-                    restaurant, halal_filter, session, translations
-                )
-                
-                if menu:
-                    menu_parts_translated.append(menu)
-                    menu_parts_translated.append("➖" * 5 + "\n")
-
-            full_message = header + "".join(menu_parts_translated)
+            # menu_parts already contains translations from process_restaurants_for_halal
+            full_message = header + "".join(menu_parts)
 
             if not dry_run:
                 chefs_choice = await get_chefs_choice(session, all_dishes)

@@ -80,6 +80,7 @@ TRANSLATION_SCHEMA = {
 }
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
@@ -185,10 +186,15 @@ def get_common_price(items: List[List[Dict]]) -> List[str]:
 @retry_with_backoff()
 async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
     """Fetch menus from the JYU API."""
+    logger.debug("Fetching menus from JYU API: %s", LUNCHES_API)
     async with session.get(LUNCHES_API) as response:
+        logger.debug("API response status: %d", response.status)
         response.raise_for_status()
         data = await response.json()
-        return data.get("results", {}).get("en", [])
+        logger.debug("API response data keys: %s", list(data.keys()) if data else "None")
+        results = data.get("results", {}).get("en", [])
+        logger.debug("Found %d restaurants in menu data", len(results))
+        return results
 
 
 @retry_with_backoff()
@@ -334,7 +340,9 @@ async def get_chefs_choice(
 
 def has_non_english_chars(text: str) -> bool:
     """Check if text contains non-English characters."""
-    return bool(re.search(r"[^\x00-\x7F]", text))
+    result = bool(re.search(r"[^\x00-\x7F]", text))
+    logger.debug("Checking '%s' for non-English chars: %s", text, result)
+    return result
 
 
 async def translate_dishes(
@@ -346,12 +354,17 @@ async def translate_dishes(
     for restaurant, dishes in dishes_by_restaurant.items():
         has_non_english = any(has_non_english_chars(dish) for dish in dishes)
         if has_non_english:
+            logger.info(
+                f"Restaurant {restaurant} has non-English dishes: {[d for d in dishes if has_non_english_chars(d)]}"
+            )
             all_dishes_to_translate.extend(dishes)
 
     if not all_dishes_to_translate:
+        logger.info("No dishes need translation")
         return {}
 
     unique_dishes = list(dict.fromkeys(all_dishes_to_translate))
+    logger.info(f"Translating {len(unique_dishes)} unique dishes: {unique_dishes}")
 
     prompt = f"""
 Translate the following dish names to English. If a dish name is already in English, return it exactly as is. Keep translations concise and food-appropriate.
@@ -366,6 +379,7 @@ Return JSON with original and translated versions for each dish.
         content = await llm_chat_json(
             session, [{"role": "user", "content": prompt}], TRANSLATION_SCHEMA
         )
+        logger.info(f"LLM response: {content}")
 
         obj = json.loads(content)
         translations = {}
@@ -375,7 +389,9 @@ Return JSON with original and translated versions for each dish.
             translated = item.get("translated", "")
             if original and translated:
                 translations[original] = translated
+                logger.info(f"Translation: '{original}' -> '{translated}'")
 
+        logger.info(f"Total translations: {len(translations)}")
         return translations
     except Exception as e:
         logger.error(f"Error translating dishes: {e}")
@@ -391,11 +407,14 @@ async def format_restaurant_menu(
 ) -> Tuple[Optional[str], List[str]]:
     """Format a restaurant's menu items and return both formatted text and list of dishes."""
     name = restaurant.get("name", "").strip()
+    logger.debug("Formatting menu for restaurant: %s", name)
     location = restaurant.get("location", {})
     items = restaurant.get("items", [])
     translations = translations or {}
+    logger.debug("Restaurant %s has %d item groups", name, len(items))
 
     if not name or not items or should_skip_restaurant(name):
+        logger.debug("Skipping restaurant %s (no name, no items, or in skip list)", name)
         return None, []
 
     # Get location name
@@ -414,6 +433,7 @@ async def format_restaurant_menu(
     common_price = get_common_price(items)
 
     for item_group in items:
+        logger.debug("Processing item group with %d items", len(item_group))
         for item in item_group:
             item_name = item.get("name", "").strip()
             if not item_name or item_name in seen_items:
@@ -421,6 +441,7 @@ async def format_restaurant_menu(
 
             item_diets = item.get("diets", [])
             item_price = item.get("price", "").strip()
+            logger.debug("Processing item: '%s', diets: %s, price: %s", item_name, item_diets, item_price)
 
             # Filter by price if common price exists
             if common_price:
@@ -432,10 +453,13 @@ async def format_restaurant_menu(
             if filter_func(item, item_diets, item_name):
                 seen_items.add(item_name)
                 display_name = translations.get(item_name, item_name)
+                if display_name != item_name:
+                    logger.debug("Applying translation: '%s' -> '%s'", item_name, display_name)
                 menu_items.append(display_name)
                 dish_names.append(item_name)
 
     if not menu_items:
+        logger.debug("No menu items for restaurant %s after filtering", name)
         return None, []
 
     # Format opening hours and price
@@ -454,6 +478,7 @@ async def format_restaurant_menu(
     # Format menu text
     menu_text = "\n• ".join(menu_items)
     formatted_menu = f"🍽️ *{name}{location_name}*\n{time_price_info}• {menu_text}\n"
+    logger.debug("Formatted menu for %s with %d items", name, len(menu_items))
 
     return formatted_menu, dish_names
 
@@ -498,8 +523,14 @@ async def process_restaurants_for_diet(
     restaurants = await fetch_menus(session)
     menu_parts = []
     all_dishes = []
+    dishes_by_restaurant = {}
 
+    # First pass: collect dishes and check which need translation
     for restaurant in restaurants:
+        name = restaurant.get("name", "").strip()
+        if not name or should_skip_restaurant(name):
+            continue
+
         # Create filter function for this diet
         def diet_filter(item, item_diets, item_name):
             return all(
@@ -511,15 +542,50 @@ async def process_restaurants_for_diet(
             restaurant, diet_filter, session
         )
 
-        if menu:
-            menu_parts.append(menu)
-            menu_parts.append("➖" * 5 + "\n")
+        if dish_names:
+            # Collect dishes for translation
+            dishes_by_restaurant[name] = dish_names
+            
+            # Collect for menu parts (will be rebuilt with translations)
+            if menu:
+                menu_parts.append(menu)
+                menu_parts.append("➖" * 5 + "\n")
 
             # Add dishes for chef's choice
             for dish_name in dish_names:
                 all_dishes.append((dish_name, restaurant.get("name", "")))
 
-    return menu_parts, all_dishes
+    # Get translations for non-English dishes
+    translations = await translate_dishes(session, dishes_by_restaurant)
+    
+    # Update dish names with translations
+    all_dishes = [
+        (translations.get(dish_name, dish_name), restaurant)
+        for dish_name, restaurant in all_dishes
+    ]
+
+    # Rebuild menu with translations
+    menu_parts_translated = []
+    for restaurant in restaurants:
+        name = restaurant.get("name", "").strip()
+        if not name or should_skip_restaurant(name):
+            continue
+        
+        def diet_filter(item, item_diets, item_name):
+            return all(
+                normalize_diet(diet) in {normalize_diet(d) for d in item_diets}
+                for diet in diets
+            )
+        
+        menu, _ = await format_restaurant_menu(
+            restaurant, diet_filter, session, translations
+        )
+        
+        if menu:
+            menu_parts_translated.append(menu)
+            menu_parts_translated.append("➖" * 5 + "\n")
+
+    return menu_parts_translated, all_dishes
 
 
 async def process_restaurants_for_halal(
@@ -572,7 +638,27 @@ async def process_restaurants_for_halal(
         if id_to_allow.get(candidate["id"], False):
             allowed_fish_by_restaurant[candidate["restaurant"]].add(candidate["name"])
 
-    # Process restaurants with allowed fish
+    # First pass: collect dishes for translation
+    dishes_by_restaurant = {}
+    for restaurant in valid_restaurants:
+        name = restaurant.get("name", "").strip()
+        allowed_fish = allowed_fish_by_restaurant[name]
+
+        # Create filter function for halal
+        def halal_filter(item, item_diets, item_name):
+            return is_veg(item_diets) or item_name in allowed_fish
+
+        _, dish_names = await format_restaurant_menu(
+            restaurant, halal_filter, session
+        )
+
+        if dish_names:
+            dishes_by_restaurant[name] = dish_names
+
+    # Get translations
+    translations = await translate_dishes(session, dishes_by_restaurant)
+
+    # Process restaurants with allowed fish and translations
     menu_parts = []
     all_dishes = []
 
@@ -585,7 +671,7 @@ async def process_restaurants_for_halal(
             return is_veg(item_diets) or item_name in allowed_fish
 
         menu, dish_names = await format_restaurant_menu(
-            restaurant, halal_filter, session
+            restaurant, halal_filter, session, translations
         )
 
         if dish_names:
@@ -594,8 +680,8 @@ async def process_restaurants_for_halal(
                 menu_parts.append(menu)
                 menu_parts.append("➖" * 5 + "\n")
 
-            # Add dishes for chef's choice
+            # Add dishes for chef's choice (with translations)
             for dish_name in dish_names:
-                all_dishes.append((dish_name, name))
+                all_dishes.append((translations.get(dish_name, dish_name), name))
 
     return menu_parts, all_dishes, allowed_fish_by_restaurant

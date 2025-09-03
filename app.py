@@ -11,6 +11,7 @@ from common_utils import (
     process_restaurants_for_diet,
     get_chefs_choice,
     send_message_chunks,
+    translate_dishes,
     Bot,
     logger,
 )
