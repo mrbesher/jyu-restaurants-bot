@@ -272,17 +272,29 @@ Output Example:
 def build_chefs_choice_prompt(lines: List[str]) -> str:
     """Build prompt for selecting chef's choice."""
     return """
-You are selecting the tastiest dish.
+You are selecting the tastiest dish for today's recommendation.
+
+PRIORITY RULES:
+1. HIGH PRIORITY: Pizza dishes - always prefer these if available
+2. HIGH PRIORITY: Fish and seafood dishes - these are also highly preferred
+3. Choose from other dishes only if no pizza or fish options are available
+
+SELECTION GUIDELINES:
+- Select exactly ONE MAIN DISH from the list below
+- If there's a compatible side dish (salad, fries, rice, etc.) that pairs well with your chosen main dish, you can mention it
+- Focus on dishes that would appeal to most people
+- Consider both taste and visual appeal
+
 Provide a minimal description of what the dish is for those who don't know it.
 
-Pick exactly ONE from this list:
+Available dishes:
 {}
 
 Return JSON example:
 {{
-    "dish": "Falafel",
+    "dish": "Pizza Margherita",
     "restaurant": "Restaurant",
-    "reason": "A popular Middle Eastern dish made from ground chickpeas, seasoned with herbs and spices, then deep-fried to golden perfection."
+    "reason": "Classic Italian pizza with fresh mozzarella, tomatoes, and basil on a crispy thin crust. A crowd favorite that never disappoints."
 }}
 """.format("\n".join(lines))
 
