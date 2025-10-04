@@ -12,6 +12,7 @@ from common_utils import (
     process_restaurants_for_halal,
     translate_dishes,
     get_chefs_choice,
+    get_halal_chefs_choice,
     send_message_chunks,
     Bot,
     is_veg,
@@ -48,7 +49,7 @@ async def build_and_post(dry_run: bool = False) -> None:
             full_message = header + "".join(menu_parts)
 
             if not dry_run:
-                chefs_choice = await get_chefs_choice(session, all_dishes)
+                chefs_choice = await get_halal_chefs_choice(session, all_dishes)
                 if chefs_choice:
                     full_message += "\n\n👨‍🍳 " + chefs_choice
 

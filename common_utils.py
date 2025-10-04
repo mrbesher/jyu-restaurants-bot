@@ -272,12 +272,31 @@ Output Example:
 def build_chefs_choice_prompt(lines: List[str]) -> str:
     """Build prompt for selecting chef's choice."""
     return """
-You are selecting the tastiest dish for today's recommendation.
+You are selecting the tastiest dish.
+Provide a minimal description of what the dish is for those who don't know it.
+
+Pick exactly ONE from this list:
+{}
+
+Return JSON example:
+{{
+    "dish": "Falafel",
+    "restaurant": "Restaurant",
+    "reason": "A popular Middle Eastern dish made from ground chickpeas, seasoned with herbs and spices, then deep-fried to golden perfection."
+}}
+""".format("\n".join(lines))
+
+
+def build_halal_chefs_choice_prompt(lines: List[str]) -> str:
+    """Build halal-specific prompt for selecting chef's choice with prioritized cuisines."""
+    return """
+You are selecting the tastiest dish for today's halal-friendly recommendation.
 
 PRIORITY RULES:
 1. HIGH PRIORITY: Pizza dishes - always prefer these if available
 2. HIGH PRIORITY: Fish and seafood dishes - these are also highly preferred
-3. Choose from other dishes only if no pizza or fish options are available
+3. HIGH PRIORITY: Middle Eastern dishes (falafel, hummus, shawarma, kebab, etc.)
+4. Choose from other dishes only if no options from above are available
 
 SELECTION GUIDELINES:
 - Select exactly ONE MAIN DISH from the list below
@@ -346,6 +365,34 @@ async def get_chefs_choice(
             return f"*{dish}* @ _{rest}_\n💬 _{reason}_"
     except Exception as e:
         logger.error("Error getting chef's choice: %s", e)
+
+    return ""
+
+
+async def get_halal_chefs_choice(
+    session: aiohttp.ClientSession, dishes: List[Tuple[str, str]]
+) -> str:
+    """Get halal chef's choice recommendation from AI with prioritized cuisines."""
+    if not dishes:
+        return ""
+
+    lines = [f"{name} @ {rest}" for name, rest in dishes]
+    prompt = build_halal_chefs_choice_prompt(lines)
+
+    try:
+        content = await llm_chat_json(
+            session, [{"role": "user", "content": prompt}], CHEFS_CHOICE_SCHEMA, 0.2
+        )
+
+        obj = json.loads(content)
+        dish = obj.get("dish", "").strip()
+        rest = obj.get("restaurant", "").strip()
+        reason = obj.get("reason", "").strip()
+
+        if dish and rest and reason:
+            return f"*{dish}* @ _{rest}_\n💬 _{reason}_"
+    except Exception as e:
+        logger.error("Error getting halal chef's choice: %s", e)
 
     return ""
 
