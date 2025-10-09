@@ -14,7 +14,7 @@ from telegram.error import TelegramError
 from md_utils import clean_and_split
 
 # Configuration
-LUNCHES_API = "https://jybar.app.jyu.fi/api/2/lunches"
+WEEKLY_API = "https://jybar.app.jyu.fi/api/2/lunches/weekly"
 LLM_CHAT_URL = (
     "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 )
@@ -184,17 +184,68 @@ def get_common_price(items: List[List[Dict]]) -> List[str]:
 
 # API functions
 @retry_with_backoff()
-async def fetch_menus(session: aiohttp.ClientSession) -> List[Dict]:
-    """Fetch menus from the JYU API."""
-    logger.debug("Fetching menus from JYU API: %s", LUNCHES_API)
-    async with session.get(LUNCHES_API) as response:
-        logger.debug("API response status: %d", response.status)
+async def fetch_menus_with_offset(session: aiohttp.ClientSession, day_offset: int = 0) -> List[Dict]:
+    """Fetch menus from the weekly API for a specific day offset.
+
+    Args:
+        session: aiohttp session
+        day_offset: Days relative to today (0=today, 1=tomorrow, -1=yesterday)
+
+    Returns:
+        List of restaurants in the same format as fetch_menus()
+    """
+    # Calculate target date
+    from datetime import datetime, timedelta
+    target_date = (datetime.now() + timedelta(days=day_offset)).strftime("%Y%m%d")
+    logger.debug(f"Fetching menus for date offset {day_offset} (date: {target_date})")
+
+    # Always fetch from weekly API
+    async with session.get(WEEKLY_API) as response:
+        logger.debug("Weekly API response status: %d", response.status)
         response.raise_for_status()
         data = await response.json()
-        logger.debug("API response data keys: %s", list(data.keys()) if data else "None")
+
+        # Filter and convert data
+        filtered_restaurants = []
         results = data.get("results", {}).get("en", [])
-        logger.debug("Found %d restaurants in menu data", len(results))
-        return results
+
+        for restaurant in results:
+            # Find the lunch for our target date
+            target_lunch = None
+            for lunch in restaurant.get("lunches", []):
+                if lunch.get("date") == target_date:
+                    target_lunch = lunch
+                    break
+
+            if target_lunch:
+                # Convert weekly format to daily format
+                converted = {
+                    "name": restaurant.get("title", ""),
+                    "restaurant_id": restaurant.get("restaurant_id", ""),
+                    "url": restaurant.get("url", ""),
+                    "time": restaurant.get("time", ""),
+                    "location": restaurant.get("location", {}),
+                    "lang": restaurant.get("lang", "en"),
+                    "items": []
+                }
+
+                # Convert items from weekly format to daily format
+                for item in target_lunch.get("items", []):
+                    # Weekly API has items[].comp[] structure
+                    components = item.get("comp", [])
+                    if components:
+                        converted["items"].append(components)
+
+                if converted["items"]:  # Only add if there are menu items
+                    filtered_restaurants.append(converted)
+
+        logger.debug(f"Found {len(filtered_restaurants)} restaurants with menus for {target_date}")
+
+        # If no restaurants have menus for the requested date, return empty list
+        if not filtered_restaurants:
+            logger.warning(f"No restaurants found with menus for {target_date}")
+
+        return filtered_restaurants
 
 
 @retry_with_backoff()
@@ -576,10 +627,10 @@ async def send_message_chunks(
 
 # High-level processing functions
 async def process_restaurants_for_diet(
-    session: aiohttp.ClientSession, diets: Set[str]
+    session: aiohttp.ClientSession, diets: Set[str], day_offset: int = 0
 ) -> Tuple[List[str], List[Tuple[str, str]]]:
     """Process restaurants for specific dietary requirements."""
-    restaurants = await fetch_menus(session)
+    restaurants = await fetch_menus_with_offset(session, day_offset)
     menu_parts = []
     all_dishes = []
     dishes_by_restaurant = {}
@@ -648,10 +699,10 @@ async def process_restaurants_for_diet(
 
 
 async def process_restaurants_for_halal(
-    session: aiohttp.ClientSession,
+    session: aiohttp.ClientSession, day_offset: int = 0
 ) -> Tuple[List[str], List[Tuple[str, str]], Dict[str, Set[str]]]:
     """Process restaurants for halal requirements (veg + fish)."""
-    restaurants = await fetch_menus(session)
+    restaurants = await fetch_menus_with_offset(session, day_offset)
 
     # Collect candidates for fish filtering
     candidates = []
