@@ -10,14 +10,9 @@ from common_utils import retry_with_backoff
 
 from common_utils import (
     process_restaurants_for_halal,
-    translate_dishes,
-    get_chefs_choice,
     get_halal_chefs_choice,
     send_message_chunks,
     Bot,
-    is_veg,
-    format_restaurant_menu,
-    fetch_menus,
 )
 
 CHANNEL_ID = os.environ["CHANNEL_ID"]
@@ -37,7 +32,7 @@ async def build_and_post(dry_run: bool = False, day_offset: int = 0) -> None:
         timeout=aiohttp.ClientTimeout(total=60)
     ) as session:
         # Process restaurants for halal requirements
-        menu_parts, all_dishes, allowed_fish_by_restaurant = await process_restaurants_for_halal(session, day_offset)
+        menu_parts, all_dishes, _ = await process_restaurants_for_halal(session, day_offset)
 
         if menu_parts:
             # Format the message
