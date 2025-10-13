@@ -573,7 +573,7 @@ async def format_restaurant_menu(
         return None, []
 
     # Format opening hours and price
-    opening_hours = restaurant.get("opening_hours", "")
+    opening_hours = restaurant.get("time", "")
     price_info = ""
     if common_price:
         price_info = f"💶 _{' / '.join(common_price)}_"
@@ -581,8 +581,11 @@ async def format_restaurant_menu(
     time_price_info = ""
     if opening_hours:
         time_price_info = f"⏰ {opening_hours}"
-        if price_info:
+    if price_info:
+        if time_price_info:
             time_price_info += f" {price_info}"
+        else:
+            time_price_info = price_info
     time_price_info = f"{time_price_info}\n" if time_price_info else ""
 
     # Format menu text
