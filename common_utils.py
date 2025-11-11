@@ -12,6 +12,7 @@ from telegram import Bot
 from telegram.error import TelegramError
 
 from md_utils import clean_and_split
+from retry_utils import retry_with_backoff
 
 # Configuration
 WEEKLY_API = "https://jybar.app.jyu.fi/api/2/lunches/weekly"
@@ -617,6 +618,14 @@ async def format_restaurant_menu(
     return formatted_menu, group_data
 
 
+@retry_with_backoff()
+async def send_single_message(bot: Bot, channel_id: str, chunk: str) -> None:
+    """Send a single message chunk to Telegram with retry."""
+    await bot.send_message(
+        chat_id=channel_id, text=chunk, parse_mode="Markdown"
+    )
+
+
 async def send_message_chunks(
     bot: Bot, channel_id: str, text: str, dry_run: bool = False
 ) -> None:
@@ -626,27 +635,15 @@ async def send_message_chunks(
 
     chunks = clean_and_split(text)
     for chunk in chunks:
-        try:
-            if dry_run:
-                logger.info(f"[DRY RUN] Would send to Telegram: {chunk}")
-            else:
-                await bot.send_message(
-                    chat_id=channel_id, text=chunk, parse_mode="Markdown"
-                )
+        if dry_run:
+            logger.info(f"[DRY RUN] Would send to Telegram: {chunk}")
+        else:
+            try:
+                await send_single_message(bot, channel_id, chunk)
                 await asyncio.sleep(0.1)
-        except TelegramError as e:
-            logger.error(f"Error sending message to Telegram: {str(e)}")
-            if "retry after" in str(e).lower():
-                retry_after = int("".join(filter(str.isdigit, str(e))))
-                await asyncio.sleep(min(retry_after, 30))
-                try:
-                    await bot.send_message(
-                        chat_id=channel_id, text=chunk, parse_mode="Markdown"
-                    )
-                except TelegramError:
-                    logger.error(f"Failed to send chunk after retry: {chunk}")
-            else:
-                logger.error(f"Problematic chunk: {chunk}")
+            except TelegramError as e:
+                logger.error(f"Failed to send chunk after all retries: {chunk}")
+                logger.error(f"Final error: {str(e)}")
 
 
 # High-level processing functions
