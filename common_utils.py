@@ -747,6 +747,7 @@ async def process_restaurants_for_halal(
         for group in items:
             group_has_non_veg = False
             group_items = []
+            item_index = 0
 
             for item in group:
                 item_name = item.get("name", "").strip()
@@ -768,13 +769,14 @@ async def process_restaurants_for_halal(
                     group_has_non_veg = True
                     candidates.append(
                         {
-                            "id": f"{name}|{group_index}",
+                            "id": f"{name}|{group_index}|{item_index}",
                             "restaurant": name,
                             "name": item_name,
                             "diets": diets,
                             "ingredients": item.get("ingredients", "").strip(),
                         }
                     )
+                item_index += 1
 
             # Track if this group has any non-veg items
             if group_has_non_veg:
