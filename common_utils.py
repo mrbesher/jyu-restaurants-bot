@@ -541,8 +541,8 @@ async def format_restaurant_menu(
     # Check if restaurant has prices and limit groups if needed
     common_price = get_common_price(items)
     if not common_price and name not in NO_PRICE_LIMIT_EXCEPTIONS:
-        items = items[:3]
-        logger.debug("No prices found, limiting to first 3 groups for %s", name)
+        items = items[:4]
+        logger.debug("No prices found, limiting to first 4 groups for %s", name)
 
     # Process menu items by groups
     seen_items = set()
