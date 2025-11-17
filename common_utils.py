@@ -85,38 +85,6 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 
-def retry_with_backoff(max_retries: int = 3, base_delay: float = 2.0):
-    """Retry decorator with exponential backoff."""
-
-    def decorator(func):
-        async def wrapper(*args, **kwargs):
-            last_exception = None
-            for attempt in range(max_retries):
-                try:
-                    return await func(*args, **kwargs)
-                except (
-                    aiohttp.ClientError,
-                    asyncio.TimeoutError,
-                    json.JSONDecodeError,
-                ) as e:
-                    last_exception = e
-                    if attempt < max_retries - 1:
-                        delay = base_delay * (2**attempt)
-                        logger.warning(
-                            f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s..."
-                        )
-                        await asyncio.sleep(delay)
-                    continue
-                except Exception as e:
-                    logger.error(f"Non-retryable error in {func.__name__}: {e}")
-                    raise
-
-            logger.error(f"All {max_retries} attempts failed for {func.__name__}")
-            raise last_exception
-
-        return wrapper
-
-    return decorator
 
 
 # Restaurant and filtering utilities

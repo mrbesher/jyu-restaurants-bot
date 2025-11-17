@@ -6,7 +6,7 @@ import logging
 import os
 
 import aiohttp
-from common_utils import retry_with_backoff
+from retry_utils import retry_with_backoff
 
 from common_utils import (
     process_restaurants_for_halal,

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 def retry_with_backoff(
     *,
-    max_attempts: int = 3,
+    max_attempts: int = 5,
     base_delay: float = 1.0,
     max_delay: float = 30.0,
     exponential_base: float = 2.0,
@@ -69,7 +69,7 @@ def retry_with_backoff(
 
 def retry_with_backoff_sync(
     *,
-    max_attempts: int = 3,
+    max_attempts: int = 5,
     base_delay: float = 1.0,
     max_delay: float = 30.0,
     exponential_base: float = 2.0,
