@@ -18,6 +18,11 @@ from common_utils import (
 
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 
+# Suppress telegram library debug logging that may leak tokens
+logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
