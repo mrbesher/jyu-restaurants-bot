@@ -19,7 +19,7 @@ WEEKLY_API = "https://jybar.app.jyu.fi/api/2/lunches/weekly"
 LLM_CHAT_URL = (
     "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 )
-LLM_MODEL = "gemini-2.5-flash"
+LLM_MODEL = "gemini-3-flash-preview"
 SKIP_RESTAURANTS = ["tilia", "normaalikoulu", "kvarkki", "bistro"]
 NO_PRICE_LIMIT_EXCEPTIONS = ["Ilokivi"]  # Restaurants that can show all groups even without prices
 
@@ -293,17 +293,20 @@ Output Example:
 def build_chefs_choice_prompt(lines: List[str]) -> str:
     """Build prompt for selecting chef's choice."""
     return """
-You are selecting the tastiest dish group.
-Provide a minimal description of what the dish is for those who don't know it.
+You are selecting the tastiest dish.
+Each item represents a grouping of dishes (e.g., same dish with different sides), referred to by the main dish name.
 
 Pick exactly ONE from this list:
 {}
 
-Return JSON example:
+Return JSON:
+- "reason": very minimal short description of the dish (2-5 words)
+
+Example:
 {{
-    "dish": "Falafel group",
+    "dish": "Falafel",
     "restaurant": "Restaurant",
-    "reason": "A popular Middle Eastern dish made from ground chickpeas, seasoned with herbs and spices, then deep-fried to golden perfection."
+    "reason": "Crispy chickpea patties with herbs"
 }}
 """.format("\n".join(lines))
 
@@ -311,7 +314,8 @@ Return JSON example:
 def build_halal_chefs_choice_prompt(lines: List[str]) -> str:
     """Build halal-specific prompt for selecting chef's choice with prioritized cuisines."""
     return """
-You are selecting the tastiest dish group for today's halal-friendly recommendation.
+You are selecting the tastiest dish for today's halal-friendly recommendation.
+Each item represents a grouping of dishes (e.g., same dish with different sides), referred to by the main dish name.
 
 PRIORITY RULES:
 1. HIGH PRIORITY: Pizza dishes - always prefer these if available
@@ -320,21 +324,22 @@ PRIORITY RULES:
 4. Choose from other dishes only if no options from above are available
 
 SELECTION GUIDELINES:
-- Select exactly ONE MAIN DISH GROUP from the list below
+- Select exactly ONE MAIN DISH from the list below
 - If there's a compatible side dish (salad, fries, rice, etc.) that pairs well with your chosen main dish, you can mention it
 - Focus on dishes that would appeal to most people
 - Consider both taste and visual appeal
 
-Provide a minimal description of what the dish is for those who don't know it.
-
 Available dishes:
 {}
 
-Return JSON example:
+Return JSON:
+- "reason": very minimal short description of the dish (2-5 words)
+
+Example:
 {{
-    "dish": "Pizza Margherita group",
+    "dish": "Pizza Margherita",
     "restaurant": "Restaurant",
-    "reason": "Classic Italian pizza with fresh mozzarella, tomatoes, and basil on a crispy thin crust. A crowd favorite that never disappoints."
+    "reason": "Classic tomato and mozzarella pizza"
 }}
 """.format("\n".join(lines))
 
@@ -655,8 +660,7 @@ async def process_restaurants_for_diet(
 
             # Add groups for chef's choice
             for first_dish, dishes in group_data:
-                group_name = f"{first_dish} group"
-                all_dishes.append((group_name, restaurant.get("name", "")))
+                all_dishes.append((first_dish, restaurant.get("name", "")))
 
     # Get translations for non-English dishes
     translations = await translate_dishes(session, dishes_by_restaurant)
@@ -818,6 +822,6 @@ async def process_restaurants_for_halal(
             # Add groups for chef's choice (with translations)
             for first_dish, dishes in group_data:
                 translated_first = translations.get(first_dish, first_dish)
-                all_dishes.append((f"{translated_first} group", name))
+                all_dishes.append((translated_first, name))
 
     return menu_parts, all_dishes, allowed_fish_by_restaurant
