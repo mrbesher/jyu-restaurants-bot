@@ -35,7 +35,9 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False, day_offset: 
     diets_set = set(diets)
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=300)
+        ) as session:
             menu_parts, all_dishes = await process_restaurants_for_diet(session, diets_set, day_offset)
 
             if menu_parts:

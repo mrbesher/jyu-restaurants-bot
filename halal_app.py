@@ -34,7 +34,7 @@ async def build_and_post(dry_run: bool = False, day_offset: int = 0) -> None:
     bot = Bot(os.environ["BOT_TOKEN"])
 
     async with aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=60)
+        timeout=aiohttp.ClientTimeout(total=300)
     ) as session:
         # Process restaurants for halal requirements
         menu_parts, all_dishes, _ = await process_restaurants_for_halal(session, day_offset)

@@ -33,7 +33,7 @@ def retry_with_backoff(
                     if attempt == max_attempts - 1:
                         logger.error(
                             f"Failed after {max_attempts} attempts for {func.__name__}. "
-                            f"Final error: {str(e)}"
+                            f"Final error: {type(e).__name__}: {str(e)}"
                         )
                         raise
 
@@ -55,7 +55,7 @@ def retry_with_backoff(
                     else:
                         logger.warning(
                             f"Attempt {attempt + 1}/{max_attempts} failed for {func.__name__}. "
-                            f"Error: {str(e)}. Retrying in {delay:.1f}s..."
+                            f"Error: {type(e).__name__}: {str(e)}. Retrying in {delay:.1f}s..."
                         )
 
                     await asyncio.sleep(delay)
@@ -91,7 +91,7 @@ def retry_with_backoff_sync(
                     if attempt == max_attempts - 1:
                         logger.error(
                             f"Failed after {max_attempts} attempts for {func.__name__}. "
-                            f"Final error: {str(e)}"
+                            f"Final error: {type(e).__name__}: {str(e)}"
                         )
                         raise
 
@@ -102,7 +102,7 @@ def retry_with_backoff_sync(
 
                     logger.warning(
                         f"Attempt {attempt + 1}/{max_attempts} failed for {func.__name__}. "
-                        f"Error: {str(e)}. Retrying in {delay:.1f}s..."
+                        f"Error: {type(e).__name__}: {str(e)}. Retrying in {delay:.1f}s..."
                     )
 
                     import time
