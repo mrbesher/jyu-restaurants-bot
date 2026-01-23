@@ -252,6 +252,7 @@ async def llm_chat_json(
         "messages": messages,
         "response_format": {"type": "json_schema", "json_schema": schema},
         "temperature": temperature,
+        "reasoning_effort": "minimal",
     }
 
     async with session.post(LLM_CHAT_URL, headers=headers, json=payload) as resp:
