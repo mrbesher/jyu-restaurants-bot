@@ -21,20 +21,17 @@ jobs:
         run: |
           uv sync --frozen
 
-      - name: Run diet bot
+      - name: Run bots
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          CHANNEL_ID: ${{ secrets.VEGAN_CHANNEL_ID }}
         run: |
-          uv run app.py
-
-      - name: Run halal bot
-        env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          CHANNEL_ID: ${{ secrets.HALAL_CHANNEL_ID }}
-        run: |
-          uv run halal_app.py
+          CHANNEL_ID="${{ secrets.VEGAN_CHANNEL_ID }}" uv run app.py &
+          pid1=$!
+          CHANNEL_ID="${{ secrets.HALAL_CHANNEL_ID }}" uv run halal_app.py &
+          pid2=$!
+          fail=0
+          wait $pid1 || fail=1
+          wait $pid2 || fail=1
+          exit $fail

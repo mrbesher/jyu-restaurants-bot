@@ -84,7 +84,7 @@ TRANSLATION_SCHEMA = {
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-
+_location_cache: Dict[Tuple[float, float], str] = {}
 
 
 # Restaurant and filtering utilities
@@ -223,12 +223,19 @@ async def get_location_name(
     lat: float, lon: float, session: aiohttp.ClientSession
 ) -> str:
     """Get location name from coordinates using OpenStreetMap."""
+    key = (lat, lon)
+    if key in _location_cache:
+        return _location_cache[key]
+
     url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
     async with session.get(url) as response:
         if response.status == 200:
             data = await response.json()
             address = data.get("address", {})
-            return address.get("suburb") or address.get("neighbourhood") or ""
+            result = address.get("suburb") or address.get("neighbourhood") or ""
+            _location_cache[key] = result
+            return result
+    _location_cache[key] = ""
     return ""
 
 
@@ -484,6 +491,53 @@ Return JSON with original and translated versions for each dish.
         return {}
 
 
+def collect_filtered_dishes(
+    restaurant: Dict, filter_func
+) -> List[Tuple[str, List[str]]]:
+    """Run filter logic on a restaurant and return group data without formatting or HTTP calls.
+
+    Returns a list of (first_dish_name, all_dish_names) per group, mirroring
+    the filtering logic in format_restaurant_menu.
+    """
+    name = restaurant.get("name", "").strip()
+    items = restaurant.get("items", [])
+
+    if not name or not items or should_skip_restaurant(name):
+        return []
+
+    common_price = get_common_price(items)
+    if not common_price and name not in NO_PRICE_LIMIT_EXCEPTIONS:
+        items = items[:4]
+
+    seen_items: Set[str] = set()
+    group_data = []
+
+    for item_group in items:
+        group_dishes: List[str] = []
+
+        for item in item_group:
+            item_name = item.get("name", "").strip()
+            if not item_name or item_name in seen_items:
+                continue
+
+            item_diets = item.get("diets", [])
+            item_price = item.get("price", "").strip()
+
+            if common_price:
+                item_prices = extract_prices(item_price)
+                if item_prices and item_prices != common_price:
+                    continue
+
+            if filter_func(item, item_diets, item_name):
+                seen_items.add(item_name)
+                group_dishes.append(item_name)
+
+        if group_dishes:
+            group_data.append((group_dishes[0], group_dishes))
+
+    return group_data
+
+
 # Formatting and sending functions
 async def format_restaurant_menu(
     restaurant: Dict,
@@ -626,74 +680,52 @@ async def process_restaurants_for_diet(
 ) -> Tuple[List[str], List[Tuple[str, str]]]:
     """Process restaurants for specific dietary requirements."""
     restaurants = await fetch_menus_with_offset(session, day_offset)
-    menu_parts = []
-    all_dishes = []
-    dishes_by_restaurant = {}
 
-    # First pass: collect dishes and check which need translation
+    def diet_filter(item, item_diets, item_name):
+        return all(
+            normalize_diet(diet) in {normalize_diet(d) for d in item_diets}
+            for diet in diets
+        )
+
+    # Collect dish names for translation (fast, no HTTP calls)
+    dishes_by_restaurant: Dict[str, List[str]] = {}
+    all_dishes: List[Tuple[str, str]] = []
+    valid_restaurants = []
+
     for restaurant in restaurants:
         name = restaurant.get("name", "").strip()
         if not name or should_skip_restaurant(name):
             continue
+        valid_restaurants.append(restaurant)
 
-        # Create filter function for this diet
-        def diet_filter(item, item_diets, item_name):
-            return all(
-                normalize_diet(diet) in {normalize_diet(d) for d in item_diets}
-                for diet in diets
-            )
-
-        menu, group_data = await format_restaurant_menu(
-            restaurant, diet_filter, session
-        )
-
+        group_data = collect_filtered_dishes(restaurant, diet_filter)
         if group_data:
-            # Collect dishes for translation
-            all_dishes_in_restaurant = []
-            for _, dishes in group_data:
-                all_dishes_in_restaurant.extend(dishes)
-            dishes_by_restaurant[name] = all_dishes_in_restaurant
+            dishes_by_restaurant[name] = [
+                d for _, dishes in group_data for d in dishes
+            ]
+            for first_dish, _ in group_data:
+                all_dishes.append((first_dish, name))
 
-            # Collect for menu parts (will be rebuilt with translations)
-            if menu:
-                menu_parts.append(menu)
-                menu_parts.append("➖" * 5 + "\n")
-
-            # Add groups for chef's choice
-            for first_dish, dishes in group_data:
-                all_dishes.append((first_dish, restaurant.get("name", "")))
-
-    # Get translations for non-English dishes
     translations = await translate_dishes(session, dishes_by_restaurant)
 
-    # Update dish names with translations
     all_dishes = [
         (translations.get(dish_name, dish_name), restaurant)
         for dish_name, restaurant in all_dishes
     ]
 
-    # Rebuild menu with translations
-    menu_parts_translated = []
-    for restaurant in restaurants:
-        name = restaurant.get("name", "").strip()
-        if not name or should_skip_restaurant(name):
-            continue
+    # Format menus once with translations (parallel)
+    menus = await asyncio.gather(*[
+        format_restaurant_menu(r, diet_filter, session, translations)
+        for r in valid_restaurants
+    ])
 
-        def diet_filter(item, item_diets, item_name):
-            return all(
-                normalize_diet(diet) in {normalize_diet(d) for d in item_diets}
-                for diet in diets
-            )
-
-        menu, _ = await format_restaurant_menu(
-            restaurant, diet_filter, session, translations
-        )
-
+    menu_parts: List[str] = []
+    for menu, _ in menus:
         if menu:
-            menu_parts_translated.append(menu)
-            menu_parts_translated.append("➖" * 5 + "\n")
+            menu_parts.append(menu)
+            menu_parts.append("➖" * 5 + "\n")
 
-    return menu_parts_translated, all_dishes
+    return menu_parts, all_dishes
 
 
 async def process_restaurants_for_halal(
@@ -702,10 +734,9 @@ async def process_restaurants_for_halal(
     """Process restaurants for halal requirements (veg + fish)."""
     restaurants = await fetch_menus_with_offset(session, day_offset)
 
-    # Collect candidates for fish filtering at group level
-    candidates = []
+    # Collect non-veg candidates for LLM fish filtering
+    candidates: List[Dict] = []
     valid_restaurants = []
-    group_candidates = []  # Track which groups contain non-veg items
 
     for restaurant in restaurants:
         name = restaurant.get("name", "").strip()
@@ -716,13 +747,8 @@ async def process_restaurants_for_halal(
         items = restaurant.get("items", [])
         common_price = get_common_price(items)
 
-        group_index = 0
-        for group in items:
-            group_has_non_veg = False
-            group_items = []
-            item_index = 0
-
-            for item in group:
+        for group_index, group in enumerate(items):
+            for item_index, item in enumerate(group):
                 item_name = item.get("name", "").strip()
                 if not item_name:
                     continue
@@ -730,16 +756,9 @@ async def process_restaurants_for_halal(
                 diets = item.get("diets", [])
                 price = item.get("price", "").strip()
 
-                group_items.append({
-                    "name": item_name,
-                    "diets": diets,
-                    "price": price
-                })
-
                 if not is_veg(diets) and (
                     not common_price or extract_prices(price) == common_price
                 ):
-                    group_has_non_veg = True
                     candidates.append(
                         {
                             "id": f"{name}|{group_index}|{item_index}",
@@ -749,80 +768,58 @@ async def process_restaurants_for_halal(
                             "ingredients": item.get("ingredients", "").strip(),
                         }
                     )
-                item_index += 1
 
-            # Track if this group has any non-veg items
-            if group_has_non_veg:
-                group_candidates.append({
-                    "restaurant": name,
-                    "group_index": group_index,
-                    "items": group_items
-                })
-
-            group_index += 1
-
-    # Filter fish dishes
+    # Filter fish dishes via LLM
     id_to_allow = await filter_fish_only(session, candidates)
-    allowed_fish_by_restaurant = defaultdict(set)
-    allowed_groups_by_restaurant = defaultdict(set)
+    allowed_fish_by_restaurant: Dict[str, Set[str]] = defaultdict(set)
 
     for candidate in candidates:
         if id_to_allow.get(candidate["id"], False):
             allowed_fish_by_restaurant[candidate["restaurant"]].add(candidate["name"])
-            # Extract group index from id
-            group_idx = int(candidate["id"].split("|")[1])
-            allowed_groups_by_restaurant[candidate["restaurant"]].add(group_idx)
 
-    # First pass: collect dishes for translation
-    dishes_by_restaurant = {}
-    for restaurant in valid_restaurants:
-        name = restaurant.get("name", "").strip()
-        allowed_fish = allowed_fish_by_restaurant[name]
-        allowed_groups = allowed_groups_by_restaurant[name]
-
-        # Create filter function for halal
+    def make_halal_filter(allowed_fish: Set[str]):
         def halal_filter(item, item_diets, item_name):
             return is_veg(item_diets) or item_name in allowed_fish
+        return halal_filter
 
-        _, group_data = await format_restaurant_menu(
-            restaurant, halal_filter, session
-        )
+    # Collect dish names for translation (fast, no HTTP calls)
+    dishes_by_restaurant: Dict[str, List[str]] = {}
+    all_dishes: List[Tuple[str, str]] = []
 
+    for restaurant in valid_restaurants:
+        name = restaurant.get("name", "").strip()
+        halal_filter = make_halal_filter(allowed_fish_by_restaurant[name])
+
+        group_data = collect_filtered_dishes(restaurant, halal_filter)
         if group_data:
-            # Collect dishes for translation
-            all_dishes_in_restaurant = []
-            for _, dishes in group_data:
-                all_dishes_in_restaurant.extend(dishes)
-            dishes_by_restaurant[name] = all_dishes_in_restaurant
+            dishes_by_restaurant[name] = [
+                d for _, dishes in group_data for d in dishes
+            ]
+            for first_dish, _ in group_data:
+                all_dishes.append((first_dish, name))
 
-    # Get translations
     translations = await translate_dishes(session, dishes_by_restaurant)
 
-    # Process restaurants with allowed fish and translations
-    menu_parts = []
-    all_dishes = []
+    all_dishes = [
+        (translations.get(dish_name, dish_name), restaurant)
+        for dish_name, restaurant in all_dishes
+    ]
 
-    for restaurant in valid_restaurants:
-        name = restaurant.get("name", "").strip()
-        allowed_fish = allowed_fish_by_restaurant[name]
-
-        # Create filter function for halal
-        def halal_filter(item, item_diets, item_name):
-            return is_veg(item_diets) or item_name in allowed_fish
-
-        menu, group_data = await format_restaurant_menu(
-            restaurant, halal_filter, session, translations
+    # Format menus once with translations (parallel)
+    menus = await asyncio.gather(*[
+        format_restaurant_menu(
+            r,
+            make_halal_filter(allowed_fish_by_restaurant[r.get("name", "").strip()]),
+            session,
+            translations,
         )
+        for r in valid_restaurants
+    ])
 
-        if group_data:
-            # Collect for translation
-            if menu:
-                menu_parts.append(menu)
-                menu_parts.append("➖" * 5 + "\n")
-
-            # Add groups for chef's choice (with translations)
-            for first_dish, dishes in group_data:
-                translated_first = translations.get(first_dish, first_dish)
-                all_dishes.append((translated_first, name))
+    menu_parts: List[str] = []
+    for menu, _ in menus:
+        if menu:
+            menu_parts.append(menu)
+            menu_parts.append("➖" * 5 + "\n")
 
     return menu_parts, all_dishes, allowed_fish_by_restaurant
