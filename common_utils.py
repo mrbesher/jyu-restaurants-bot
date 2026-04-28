@@ -455,18 +455,23 @@ async def translate_dishes(
 
     translations: dict[str, str] = {}
     uncached: list[str] = []
+    cache_hits = 0
 
     for dish in all_dishes:
         cached = cache.get(dish)
         if cached is not None:
             translations[dish] = cached
+            cache_hits += 1
         elif not has_non_english_chars(dish):
             translations[dish] = dish
         else:
             uncached.append(dish)
 
     if not uncached:
-        logger.info("All %d dishes found in translation cache", len(translations))
+        logger.info(
+            "All %d dishes resolved (%d cached, %d English)",
+            len(translations), cache_hits, len(translations) - cache_hits,
+        )
         return translations
 
     logger.info("Translating %d uncached dishes", len(uncached))
