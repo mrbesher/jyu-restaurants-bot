@@ -3,7 +3,6 @@ import asyncio
 import datetime
 import logging
 import os
-from typing import List
 
 import aiohttp
 
@@ -11,14 +10,11 @@ from common_utils import (
     process_restaurants_for_diet,
     get_chefs_choice,
     send_message_chunks,
-    translate_dishes,
     Bot,
-    logger,
 )
 
 CHANNEL_ID = os.environ["CHANNEL_ID"]
 
-# Suppress telegram library debug logging that may leak tokens
 logging.getLogger("telegram").setLevel(logging.WARNING)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -29,8 +25,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def post_daily_menus(diets: List[str], dry_run: bool = False, day_offset: int = 0):
-    """Fetch and post restaurant menus to the Telegram channel."""
+async def post_daily_menus(diets: list[str], dry_run: bool = False, day_offset: int = 0):
     bot = Bot(os.environ["BOT_TOKEN"])
     diets_set = set(diets)
 
@@ -43,8 +38,6 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False, day_offset: 
             if menu_parts:
                 diet_str = " & ".join(diets)
                 current_date = datetime.date.today() + datetime.timedelta(days=day_offset)
-
-                # Format date as "Day Name, Month Day"
                 formatted_date = current_date.strftime("%A, %B %d")
                 header = f"🌱 *{diet_str} Menu for {formatted_date}*\n\n"
                 full_message = header + "".join(menu_parts)
@@ -55,15 +48,13 @@ async def post_daily_menus(diets: List[str], dry_run: bool = False, day_offset: 
                         full_message += "\n\n👨‍🍳 " + chefs_choice
 
                 await send_message_chunks(bot, CHANNEL_ID, full_message, dry_run)
-                logger.info(f"Successfully posted {diet_str} menu summary to channel")
+                logger.info("Successfully posted %s menu summary to channel", diet_str)
             else:
-                if day_offset == 0:
-                    logger.warning(f"No {' & '.join(diets)} options available for today")
-                else:
-                    logger.warning(f"No {' & '.join(diets)} options available for day offset {day_offset}")
+                date_label = "today" if day_offset == 0 else f"day offset {day_offset}"
+                logger.warning("No %s options available for %s", " & ".join(diets), date_label)
 
     except Exception as e:
-        logger.error(f"Error in post_daily_menus: {e}")
+        logger.error("Error in post_daily_menus: %s", e)
 
 
 if __name__ == "__main__":
@@ -90,6 +81,10 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
-    logger.info(f"Posting {' & '.join(args.diets)} menus (dry run: {args.dry_run}, day offset: {args.day_offset})")
+    logger.info(
+        "Posting %s menus (dry run: %s, day offset: %s)",
+        " & ".join(args.diets),
+        args.dry_run,
+        args.day_offset,
+    )
     asyncio.run(post_daily_menus(args.diets, args.dry_run, args.day_offset))

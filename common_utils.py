@@ -5,7 +5,8 @@ import logging
 import os
 import re
 from collections import Counter, defaultdict
-from typing import Any, Dict, List, Optional, Set, Tuple
+from pathlib import Path
+from typing import Any
 
 import aiohttp
 from telegram import Bot
@@ -14,20 +15,17 @@ from telegram.error import TelegramError
 from md_utils import clean_and_split
 from retry_utils import retry_with_backoff
 
-# Configuration
 WEEKLY_API = "https://jybar.app.jyu.fi/api/2/lunches/weekly"
 LLM_CHAT_URL = (
     "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 )
 LLM_MODEL = "gemini-3-flash-preview"
-SKIP_RESTAURANTS = ["tilia", "normaalikoulu", "kvarkki", "bistro"]
-NO_PRICE_LIMIT_EXCEPTIONS = ["Ilokivi"]  # Restaurants that can show all groups even without prices
+SKIP_RESTAURANTS = {"tilia", "normaalikoulu", "kvarkki", "bistro"}
+NO_PRICE_LIMIT_EXCEPTIONS = {"Ilokivi"}
 
-# Environment variables
 TELEGRAM_BOT_TOKEN = os.environ["BOT_TOKEN"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Schemas
 CHEFS_CHOICE_SCHEMA = {
     "name": "chefs_choice_response",
     "strict": "true",
@@ -82,150 +80,155 @@ TRANSLATION_SCHEMA = {
 }
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-_location_cache: Dict[Tuple[float, float], str] = {}
 
 
-# Restaurant and filtering utilities
+class FileCache:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._data: dict[str, str] = {}
+        self._load()
+
+    def _load(self) -> None:
+        if self.path.exists():
+            try:
+                with open(self.path, encoding="utf-8") as f:
+                    self._data = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Failed to load cache %s: %s", self.path, e)
+                self._data = {}
+
+    def get(self, key: str) -> str | None:
+        return self._data.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self._data[key] = value
+
+    def save(self) -> None:
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.error("Failed to save cache %s: %s", self.path, e)
+
+
+_DIET_MAPPING = {
+    "VEG": {"VEG", "VEGAN", "VEGAANI", "VEGAANINEN", "VEGETAARINEN", "VEGETARIAN"},
+    "L": {"L", "LAKTOOSITON"},
+    "G": {"G", "GLUTEENITON"},
+    "M": {"M", "MAIDOTON"},
+}
+
+
 def normalize_diet(diet: str) -> str:
-    """Normalize diet names to handle different variations."""
-    diet_mapping = {
-        "VEG": {"VEG", "VEGAN", "VEGAANI", "VEGAANINEN", "VEGETAARINEN", "VEGETARIAN"},
-        "L": {"L", "LAKTOOSITON"},
-        "G": {"G", "GLUTEENITON"},
-        "M": {"M", "MAIDOTON"},
-    }
-
-    upper_diet = diet.upper()
-    for normalized, variations in diet_mapping.items():
-        if any(upper_diet.startswith(v) for v in variations):
+    upper = diet.upper()
+    for normalized, variations in _DIET_MAPPING.items():
+        if any(upper.startswith(v) for v in variations):
             return normalized
-    return upper_diet
+    return upper
 
 
 def should_skip_restaurant(restaurant_name: str) -> bool:
-    """Check if restaurant should be skipped based on SKIP_RESTAURANTS list."""
     if not restaurant_name:
         return True
-
     name_lower = restaurant_name.lower()
     return any(skip_name in name_lower for skip_name in SKIP_RESTAURANTS)
 
 
-def is_veg(diets: List[str]) -> bool:
-    """Check if dish is vegetarian."""
+def is_veg(diets: list[str]) -> bool:
     return any(normalize_diet(d) == "VEG" for d in diets)
 
 
-def extract_prices(price_string: str) -> List[str]:
-    """Extract all valid prices from a price string and sort them cheapest to most expensive."""
-    price_pattern = r"\d{1,2}[\.,]\d{2}"
-    matches = re.findall(price_pattern, price_string)
-    # Sort prices numerically (cheapest first)
+def extract_prices(price_string: str) -> list[str]:
+    matches = re.findall(r"\d{1,2}[.,]\d{2}", price_string)
     matches.sort(key=lambda p: float(p.replace(",", ".")))
     return matches
 
 
-def get_common_price(items: List[List[Dict]]) -> List[str]:
-    """Find the most common price list across all dishes.
-    Returns the price list tuple that appears most frequently."""
-    price_list_counts = Counter()
-
-    for item_group in items:
-        for item in item_group:
+def get_common_price(items: list[list[dict]]) -> list[str] | None:
+    counts = Counter()
+    for group in items:
+        for item in group:
             price_str = item.get("price", "").strip()
             if price_str:
-                prices = extract_prices(price_str)
+                prices = tuple(extract_prices(price_str))
                 if prices:
-                    # Convert to tuple for counting
-                    price_tuple = tuple(prices)
-                    price_list_counts[price_tuple] += 1
-
-    if not price_list_counts:
-        return []
-
-    # Find the most common price list
-    most_common_tuple = price_list_counts.most_common(1)[0][0]
-
-    # Convert back to list
-    return list(most_common_tuple)
+                    counts[prices] += 1
+    if not counts:
+        return None
+    return list(counts.most_common(1)[0][0])
 
 
-# API functions
 @retry_with_backoff()
-async def fetch_menus_with_offset(session: aiohttp.ClientSession, day_offset: int = 0) -> List[Dict]:
-    """Fetch menus from the weekly API for a specific day offset.
-
-    Args:
-        session: aiohttp session
-        day_offset: Days relative to today (0=today, 1=tomorrow, -1=yesterday)
-
-    Returns:
-        List of restaurants in the same format as fetch_menus()
-    """
-    # Calculate target date
+async def fetch_menus_with_offset(
+    session: aiohttp.ClientSession, day_offset: int = 0
+) -> list[dict]:
     from datetime import datetime, timedelta
-    target_date = (datetime.now() + timedelta(days=day_offset)).strftime("%Y%m%d")
-    logger.debug(f"Fetching menus for date offset {day_offset} (date: {target_date})")
 
-    # Always fetch from weekly API
+    target_date = (datetime.now() + timedelta(days=day_offset)).strftime("%Y%m%d")
+    logger.debug("Fetching menus for date offset %d (%s)", day_offset, target_date)
+
     async with session.get(WEEKLY_API) as response:
-        logger.debug("Weekly API response status: %d", response.status)
         response.raise_for_status()
         data = await response.json()
 
-        # Filter and convert data
-        filtered_restaurants = []
-        results = data.get("results", {}).get("en", [])
+    results = data.get("results", {}).get("en", [])
+    filtered = []
 
-        for restaurant in results:
-            # Find the lunch for our target date
-            target_lunch = None
-            for lunch in restaurant.get("lunches", []):
-                if lunch.get("date") == target_date:
-                    target_lunch = lunch
-                    break
+    for restaurant in results:
+        target_lunch = None
+        for lunch in restaurant.get("lunches", []):
+            if lunch.get("date") == target_date:
+                target_lunch = lunch
+                break
 
-            if target_lunch:
-                # Convert weekly format to daily format
-                converted = {
-                    "name": restaurant.get("title", ""),
-                    "restaurant_id": restaurant.get("restaurant_id", ""),
-                    "url": restaurant.get("url", ""),
-                    "time": restaurant.get("time", ""),
-                    "location": restaurant.get("location", {}),
-                    "lang": restaurant.get("lang", "en"),
-                    "items": []
-                }
+        if not target_lunch:
+            continue
 
-                # Convert items from weekly format to daily format
-                for item in target_lunch.get("items", []):
-                    # Weekly API has items[].comp[] structure
-                    components = item.get("comp", [])
-                    if components:
-                        converted["items"].append(components)
+        converted = {
+            "name": restaurant.get("title", ""),
+            "restaurant_id": restaurant.get("restaurant_id", ""),
+            "url": restaurant.get("url", ""),
+            "time": restaurant.get("time", ""),
+            "location": restaurant.get("location", {}),
+            "lang": restaurant.get("lang", "en"),
+            "items": [],
+        }
 
-                if converted["items"]:  # Only add if there are menu items
-                    filtered_restaurants.append(converted)
+        for item in target_lunch.get("items", []):
+            components = item.get("comp", [])
+            if components:
+                converted["items"].append(components)
 
-        logger.debug(f"Found {len(filtered_restaurants)} restaurants with menus for {target_date}")
+        if converted["items"]:
+            filtered.append(converted)
 
-        # If no restaurants have menus for the requested date, return empty list
-        if not filtered_restaurants:
-            logger.warning(f"No restaurants found with menus for {target_date}")
+    logger.debug("Found %d restaurants with menus for %s", len(filtered), target_date)
+    return filtered
 
-        return filtered_restaurants
+
+_LOCATION_OVERRIDES: dict[str, str] = {}
 
 
 @retry_with_backoff()
 async def get_location_name(
-    lat: float, lon: float, session: aiohttp.ClientSession
+    restaurant_name: str,
+    location: dict[str, Any],
+    session: aiohttp.ClientSession,
+    cache: FileCache,
 ) -> str:
-    """Get location name from coordinates using OpenStreetMap."""
-    key = (lat, lon)
-    if key in _location_cache:
-        return _location_cache[key]
+    override = _LOCATION_OVERRIDES.get(restaurant_name.lower())
+    if override is not None:
+        return override
+
+    lat = location.get("lat")
+    lon = location.get("lon")
+    if not lat or not lon:
+        return ""
+
+    key = f"{lat},{lon}"
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
 
     url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
     async with session.get(url) as response:
@@ -233,20 +236,20 @@ async def get_location_name(
             data = await response.json()
             address = data.get("address", {})
             result = address.get("suburb") or address.get("neighbourhood") or ""
-            _location_cache[key] = result
+            cache.set(key, result)
             return result
-    _location_cache[key] = ""
+
+    cache.set(key, "")
     return ""
 
 
 @retry_with_backoff()
 async def llm_chat_json(
     session: aiohttp.ClientSession,
-    messages: List[Dict[str, str]],
-    schema: Dict[str, Any],
+    messages: list[dict[str, str]],
+    schema: dict[str, Any],
     temperature: float = 0.0,
 ) -> str:
-    """Send a chat request to LLM with JSON schema response format."""
     if not GEMINI_API_KEY:
         raise ValueError("GEMINI_API_KEY environment variable is not set")
 
@@ -268,12 +271,12 @@ async def llm_chat_json(
         return data["choices"][0]["message"]["content"]
 
 
-# AI-powered features
-def build_fish_filter_prompt(candidates: List[Dict[str, Any]]) -> str:
-    """Build prompt for filtering fish dishes."""
-    diets_legend = "(G) Gluten-free, (L) Lactose-free, (VL) Low lactose, (M) Dairy-free, (Veg) Suitable for vegans."
-    return f"""
-You are filtering dishes for a Halal-friendly list.
+def build_fish_filter_prompt(candidates: list[dict[str, Any]]) -> str:
+    diets_legend = (
+        "(G) Gluten-free, (L) Lactose-free, (VL) Low lactose, "
+        "(M) Dairy-free, (Veg) Suitable for vegans."
+    )
+    return f"""You are filtering dishes for a Halal-friendly list.
 
 ALLOW only dishes that contain dairy/eggs, fish or seafood and no other meat (e.g. chicken, beef, pork).
 If ingredients missing, deduce from name.
@@ -284,28 +287,19 @@ Input dishes:
 
 Output Example:
 [
-    {{
-    "id": "Restaurant1|2",
-    "name": "Dish name",
-    "allow": false
-    }},
-    {{
-    "id": "Restaurant2|2",
-    "name": "Dish name",
-    "allow": false
-    }}
+    {{"id": "Restaurant1|2", "name": "Dish name", "allow": false}},
+    {{"id": "Restaurant2|2", "name": "Dish name", "allow": false}}
 ]
 """
 
 
-def build_chefs_choice_prompt(lines: List[str]) -> str:
-    """Build prompt for selecting chef's choice."""
-    return """
-You are selecting the tastiest dish.
+def build_chefs_choice_prompt(lines: list[str]) -> str:
+    dishes = "\n".join(lines)
+    return f"""You are selecting the tastiest dish.
 Each item represents a grouping of dishes (e.g., same dish with different sides), referred to by the main dish name.
 
 Pick exactly ONE from this list:
-{}
+{dishes}
 
 Return JSON:
 - "reason": very minimal short description of the dish (2-5 words)
@@ -316,13 +310,12 @@ Example:
     "restaurant": "Restaurant",
     "reason": "Crispy chickpea patties with herbs"
 }}
-""".format("\n".join(lines))
+"""
 
 
-def build_halal_chefs_choice_prompt(lines: List[str]) -> str:
-    """Build halal-specific prompt for selecting chef's choice with prioritized cuisines."""
-    return """
-You are selecting the tastiest dish for today's halal-friendly recommendation.
+def build_halal_chefs_choice_prompt(lines: list[str]) -> str:
+    dishes = "\n".join(lines)
+    return f"""You are selecting the tastiest dish for today's halal-friendly recommendation.
 Each item represents a grouping of dishes (e.g., same dish with different sides), referred to by the main dish name.
 
 PRIORITY RULES:
@@ -338,7 +331,7 @@ SELECTION GUIDELINES:
 - Consider both taste and visual appeal
 
 Available dishes:
-{}
+{dishes}
 
 Return JSON:
 - "reason": very minimal short description of the dish (2-5 words)
@@ -349,13 +342,38 @@ Example:
     "restaurant": "Restaurant",
     "reason": "Classic tomato and mozzarella pizza"
 }}
-""".format("\n".join(lines))
+"""
+
+
+def build_translation_prompt(dishes: list[str]) -> str:
+    return f"""Translate the following dish names to English. If a dish name is already in English, return it exactly as is. Keep translations concise and food-appropriate.
+
+Dishes to translate:
+{json.dumps(dishes, ensure_ascii=False)}
+
+Return JSON with original and translated versions for each dish.
+"""
+
+
+_FISH_KEYWORDS = (
+    "fish", "salmon", "tuna", "shrimp", "prawn", "cod", "haddock", "halibut",
+    "mackerel", "trout", "herring", "perch", "pike", "whitefish",
+    "seafood", "calamari", "squid", "mussel", "oyster", "crab",
+    "lobster", "anchovy", "sardine", "plaice", "pangasius", "tilapia",
+    "kala", "lohi", "tonnikala", "katkarapu", "siika", "ahven", "hauki",
+    "kuha", "silakka", "silli", "muikku", "made", "kirjolohi", "nieriä",
+    "merenelävät",
+)
+
+
+def _looks_like_fish(item_name: str, ingredients: str) -> bool:
+    text = f"{item_name} {ingredients}".lower()
+    return any(kw in text for kw in _FISH_KEYWORDS)
 
 
 async def filter_fish_only(
-    session: aiohttp.ClientSession, candidates: List[Dict]
-) -> Dict[str, bool]:
-    """Filter dishes to only include fish/seafood using AI."""
+    session: aiohttp.ClientSession, candidates: list[dict[str, Any]]
+) -> dict[str, bool]:
     if not candidates:
         return {}
 
@@ -364,32 +382,39 @@ async def filter_fish_only(
         session, [{"role": "user", "content": prompt}], FISH_FILTER_SCHEMA
     )
 
-    arr = json.loads(content)
     result = {}
     candidate_ids = {c["id"] for c in candidates}
 
-    for obj in arr:
-        if isinstance(obj.get("id"), str) and obj["id"] in candidate_ids:
-            result[obj["id"]] = bool(obj.get("allow", False))
+    try:
+        for obj in json.loads(content):
+            item_id = obj.get("id")
+            if isinstance(item_id, str) and item_id in candidate_ids:
+                result[item_id] = bool(obj.get("allow", False))
+    except Exception as e:
+        logger.error("Fish filter LLM returned invalid JSON: %s", e)
 
     return result
 
 
-async def get_chefs_choice(
-    session: aiohttp.ClientSession, dishes: List[Tuple[str, str]]
+async def _get_chefs_choice(
+    session: aiohttp.ClientSession,
+    dishes: list[tuple[str, str]],
+    prompt_builder,
+    temperature: float = 0.2,
 ) -> str:
-    """Get chef's choice recommendation from AI."""
     if not dishes:
         return ""
 
     lines = [f"{name} @ {rest}" for name, rest in dishes]
-    prompt = build_chefs_choice_prompt(lines)
+    prompt = prompt_builder(lines)
 
     try:
         content = await llm_chat_json(
-            session, [{"role": "user", "content": prompt}], CHEFS_CHOICE_SCHEMA, 0.2
+            session,
+            [{"role": "user", "content": prompt}],
+            CHEFS_CHOICE_SCHEMA,
+            temperature,
         )
-
         obj = json.loads(content)
         dish = obj.get("dish", "").strip()
         rest = obj.get("restaurant", "").strip()
@@ -403,324 +428,245 @@ async def get_chefs_choice(
     return ""
 
 
-async def get_halal_chefs_choice(
-    session: aiohttp.ClientSession, dishes: List[Tuple[str, str]]
+async def get_chefs_choice(
+    session: aiohttp.ClientSession, dishes: list[tuple[str, str]]
 ) -> str:
-    """Get halal chef's choice recommendation from AI with prioritized cuisines."""
-    if not dishes:
-        return ""
+    return await _get_chefs_choice(session, dishes, build_chefs_choice_prompt)
 
-    lines = [f"{name} @ {rest}" for name, rest in dishes]
-    prompt = build_halal_chefs_choice_prompt(lines)
 
-    try:
-        content = await llm_chat_json(
-            session, [{"role": "user", "content": prompt}], CHEFS_CHOICE_SCHEMA, 0.2
-        )
-
-        obj = json.loads(content)
-        dish = obj.get("dish", "").strip()
-        rest = obj.get("restaurant", "").strip()
-        reason = obj.get("reason", "").strip()
-
-        if dish and rest and reason:
-            return f"*{dish}* @ _{rest}_\n💬 _{reason}_"
-    except Exception as e:
-        logger.error("Error getting halal chef's choice: %s", e)
-
-    return ""
+async def get_halal_chefs_choice(
+    session: aiohttp.ClientSession, dishes: list[tuple[str, str]]
+) -> str:
+    return await _get_chefs_choice(session, dishes, build_halal_chefs_choice_prompt)
 
 
 def has_non_english_chars(text: str) -> bool:
-    """Check if text contains non-English characters."""
-    result = bool(re.search(r"[^\x00-\x7F]", text))
-    logger.debug("Checking '%s' for non-English chars: %s", text, result)
-    return result
+    return bool(re.search(r"[^\x00-\x7F]", text))
 
 
 async def translate_dishes(
-    session: aiohttp.ClientSession, dishes_by_restaurant: Dict[str, List[str]]
-) -> Dict[str, str]:
-    """Translate non-English dish names to English."""
-    all_dishes_to_translate = []
+    session: aiohttp.ClientSession,
+    dishes_by_restaurant: dict[str, list[str]],
+    cache: FileCache,
+) -> dict[str, str]:
+    all_dishes = list(dict.fromkeys(
+        d for dishes in dishes_by_restaurant.values() for d in dishes
+    ))
 
-    for restaurant, dishes in dishes_by_restaurant.items():
-        has_non_english = any(has_non_english_chars(dish) for dish in dishes)
-        if has_non_english:
-            logger.info(
-                f"Restaurant {restaurant} has non-English dishes: {[d for d in dishes if has_non_english_chars(d)]}"
-            )
-            all_dishes_to_translate.extend(dishes)
+    translations: dict[str, str] = {}
+    uncached: list[str] = []
 
-    if not all_dishes_to_translate:
-        logger.info("No dishes need translation")
-        return {}
+    for dish in all_dishes:
+        cached = cache.get(dish)
+        if cached is not None:
+            translations[dish] = cached
+        elif not has_non_english_chars(dish):
+            translations[dish] = dish
+        else:
+            uncached.append(dish)
 
-    unique_dishes = list(dict.fromkeys(all_dishes_to_translate))
-    logger.info(f"Translating {len(unique_dishes)} unique dishes: {unique_dishes}")
+    if not uncached:
+        logger.info("All %d dishes found in translation cache", len(translations))
+        return translations
 
-    prompt = f"""
-Translate the following dish names to English. If a dish name is already in English, return it exactly as is. Keep translations concise and food-appropriate.
+    logger.info("Translating %d uncached dishes", len(uncached))
 
-Dishes to translate:
-{json.dumps(unique_dishes, ensure_ascii=False)}
-
-Return JSON with original and translated versions for each dish.
-"""
-
+    prompt = build_translation_prompt(uncached)
     try:
         content = await llm_chat_json(
             session, [{"role": "user", "content": prompt}], TRANSLATION_SCHEMA
         )
-        logger.info(f"LLM response: {content}")
-
         obj = json.loads(content)
-        translations = {}
 
         for item in obj.get("translations", []):
             original = item.get("original", "")
             translated = item.get("translated", "")
             if original and translated:
                 translations[original] = translated
-                logger.info(f"Translation: '{original}' -> '{translated}'")
-
-        logger.info(f"Total translations: {len(translations)}")
-        return translations
+                cache.set(original, translated)
+                logger.info("Translation: '%s' -> '%s'", original, translated)
     except Exception as e:
-        logger.error(f"Error translating dishes: {e}")
-        return {}
+        logger.error("Error translating dishes: %s", e)
+
+    return translations
 
 
 def collect_filtered_dishes(
-    restaurant: Dict, filter_func
-) -> List[Tuple[str, List[str]]]:
-    """Run filter logic on a restaurant and return group data without formatting or HTTP calls.
-
-    Returns a list of (first_dish_name, all_dish_names) per group, mirroring
-    the filtering logic in format_restaurant_menu.
-    """
+    restaurant: dict, filter_func
+) -> tuple[list[str] | None, list[tuple[str, list[str]]]]:
     name = restaurant.get("name", "").strip()
     items = restaurant.get("items", [])
 
     if not name or not items or should_skip_restaurant(name):
-        return []
+        return None, []
 
     common_price = get_common_price(items)
     if not common_price and name not in NO_PRICE_LIMIT_EXCEPTIONS:
         items = items[:4]
 
-    seen_items: Set[str] = set()
-    group_data = []
+    seen_items: set[str] = set()
+    group_data: list[tuple[str, list[str]]] = []
 
     for item_group in items:
-        group_dishes: List[str] = []
+        group_dishes: list[str] = []
 
         for item in item_group:
             item_name = item.get("name", "").strip()
             if not item_name or item_name in seen_items:
                 continue
 
-            item_diets = item.get("diets", [])
             item_price = item.get("price", "").strip()
-
             if common_price:
                 item_prices = extract_prices(item_price)
                 if item_prices and item_prices != common_price:
                     continue
 
-            if filter_func(item, item_diets, item_name):
+            if filter_func(item):
                 seen_items.add(item_name)
                 group_dishes.append(item_name)
 
         if group_dishes:
             group_data.append((group_dishes[0], group_dishes))
 
-    return group_data
+    return common_price, group_data
 
 
-# Formatting and sending functions
-async def format_restaurant_menu(
-    restaurant: Dict,
-    filter_func,
-    session: aiohttp.ClientSession,
-    translations: Dict[str, str] = None,
-) -> Tuple[Optional[str], List[Tuple[str, List[str]]]]:
-    """Format a restaurant's menu items and return both formatted text and list of groups with dishes."""
+def format_restaurant_menu(
+    restaurant: dict,
+    common_price: list[str] | None,
+    groups: list[tuple[str, list[str]]],
+    location_name: str = "",
+    translations: dict[str, str] | None = None,
+) -> str | None:
+    if not groups:
+        return None
+
     name = restaurant.get("name", "").strip()
-    logger.debug("Formatting menu for restaurant: %s", name)
-    location = restaurant.get("location", {})
-    items = restaurant.get("items", [])
     translations = translations or {}
-    logger.debug("Restaurant %s has %d item groups", name, len(items))
 
-    if not name or not items or should_skip_restaurant(name):
-        logger.debug("Skipping restaurant %s (no name, no items, or in skip list)", name)
-        return None, []
-
-    # Get location name
-    location_name = ""
-    if location.get("lat") and location.get("lon"):
-        osm_location = await get_location_name(
-            location["lat"], location["lon"], session
-        )
-        if osm_location:
-            location_name = f" ({osm_location})"
-
-    # Check if restaurant has prices and limit groups if needed
-    common_price = get_common_price(items)
-    if not common_price and name not in NO_PRICE_LIMIT_EXCEPTIONS:
-        items = items[:4]
-        logger.debug("No prices found, limiting to first 4 groups for %s", name)
-
-    # Process menu items by groups
-    seen_items = set()
     menu_groups = []
-    group_data = []
-    group_index = 0
+    for _, dish_names in groups:
+        display_names = [translations.get(d, d) for d in dish_names]
+        menu_groups.append(" + ".join(display_names))
 
-    for item_group in items:
-        logger.debug("Processing item group with %d items", len(item_group))
-        group_items = []
-        group_dishes = []
-
-        # Check if this group has any items that pass the filter
-        group_has_items = False
-
-        for item in item_group:
-            item_name = item.get("name", "").strip()
-            if not item_name or item_name in seen_items:
-                continue
-
-            item_diets = item.get("diets", [])
-            item_price = item.get("price", "").strip()
-            logger.debug("Processing item: '%s', diets: %s, price: %s", item_name, item_diets, item_price)
-
-            # Filter by price if common price exists
-            if common_price:
-                item_prices = extract_prices(item_price)
-                if item_prices and item_prices != common_price:
-                    continue
-
-            # Apply custom filter function
-            if filter_func(item, item_diets, item_name):
-                seen_items.add(item_name)
-                display_name = translations.get(item_name, item_name)
-                if display_name != item_name:
-                    logger.debug("Applying translation: '%s' -> '%s'", item_name, display_name)
-                group_items.append(display_name)
-                group_dishes.append(item_name)
-                group_has_items = True
-
-        # Add the group if it has items
-        if group_has_items:
-            group_text = " + ".join(group_items)
-            menu_groups.append(group_text)
-            group_data.append((group_items[0] if group_items else "", group_dishes))
-            group_index += 1
-
-    if not menu_groups:
-        logger.debug("No menu items for restaurant %s after filtering", name)
-        return None, []
-
-    # Format opening hours and price
     opening_hours = restaurant.get("time", "")
-    price_info = ""
-    if common_price:
-        price_info = f"💶 _{' / '.join(common_price)}_"
+    price_info = f"💶 _{' / '.join(common_price)}_" if common_price else ""
 
     time_price_info = ""
     if opening_hours:
         time_price_info = f"⏰ {opening_hours}"
     if price_info:
-        if time_price_info:
-            time_price_info += f" {price_info}"
-        else:
-            time_price_info = price_info
+        time_price_info += f" {price_info}" if time_price_info else price_info
     time_price_info = f"{time_price_info}\n" if time_price_info else ""
 
-    # Format menu text with groups
     menu_text = "\n• ".join(menu_groups)
-    formatted_menu = f"🍽️ *{name}{location_name}*\n{time_price_info}• {menu_text}\n"
-    logger.debug("Formatted menu for %s with %d groups", name, len(menu_groups))
-
-    return formatted_menu, group_data
+    return f"🍽️ *{name}{location_name}*\n{time_price_info}• {menu_text}\n"
 
 
 @retry_with_backoff()
 async def send_single_message(bot: Bot, channel_id: str, chunk: str) -> None:
-    """Send a single message chunk to Telegram with retry."""
-    await bot.send_message(
-        chat_id=channel_id, text=chunk, parse_mode="Markdown"
-    )
+    await bot.send_message(chat_id=channel_id, text=chunk, parse_mode="Markdown")
 
 
 async def send_message_chunks(
     bot: Bot, channel_id: str, text: str, dry_run: bool = False
 ) -> None:
-    """Safely send message in chunks to Telegram."""
     if not text:
         return
 
     chunks = clean_and_split(text)
     for chunk in chunks:
         if dry_run:
-            logger.info(f"[DRY RUN] Would send to Telegram: {chunk}")
-        else:
-            try:
-                await send_single_message(bot, channel_id, chunk)
-                await asyncio.sleep(0.1)
-            except TelegramError as e:
-                logger.error(f"Failed to send chunk after all retries: {chunk}")
-                logger.error(f"Final error: {str(e)}")
+            logger.info("[DRY RUN] Would send: %s", chunk)
+            continue
+        try:
+            await send_single_message(bot, channel_id, chunk)
+            await asyncio.sleep(0.1)
+        except TelegramError as e:
+            logger.error("Failed to send chunk after all retries: %s", chunk)
+            logger.error("Final error: %s", e)
 
 
-# High-level processing functions
 async def process_restaurants_for_diet(
-    session: aiohttp.ClientSession, diets: Set[str], day_offset: int = 0
-) -> Tuple[List[str], List[Tuple[str, str]]]:
-    """Process restaurants for specific dietary requirements."""
+    session: aiohttp.ClientSession, diets: set[str], day_offset: int = 0
+) -> tuple[list[str], list[tuple[str, str]]]:
     restaurants = await fetch_menus_with_offset(session, day_offset)
 
-    def diet_filter(item, item_diets, item_name):
-        return all(
-            normalize_diet(diet) in {normalize_diet(d) for d in item_diets}
-            for diet in diets
-        )
+    normalized_diets = {normalize_diet(d) for d in diets}
 
-    # Collect dish names for translation (fast, no HTTP calls)
-    dishes_by_restaurant: Dict[str, List[str]] = {}
-    all_dishes: List[Tuple[str, str]] = []
-    valid_restaurants = []
+    def diet_filter(item: dict) -> bool:
+        item_diets = item.get("diets", [])
+        normalized_item_diets = {normalize_diet(d) for d in item_diets}
+        return normalized_diets <= normalized_item_diets
+
+    valid_restaurants: list[dict] = []
+    common_prices: dict[str, list[str] | None] = {}
+    all_group_data: dict[str, list[tuple[str, list[str]]]] = {}
+    dishes_by_restaurant: dict[str, list[str]] = {}
+    all_dishes: list[tuple[str, str]] = []
 
     for restaurant in restaurants:
         name = restaurant.get("name", "").strip()
         if not name or should_skip_restaurant(name):
             continue
-        valid_restaurants.append(restaurant)
 
-        group_data = collect_filtered_dishes(restaurant, diet_filter)
+        valid_restaurants.append(restaurant)
+        common_price, group_data = collect_filtered_dishes(restaurant, diet_filter)
+
         if group_data:
+            common_prices[name] = common_price
+            all_group_data[name] = group_data
             dishes_by_restaurant[name] = [
                 d for _, dishes in group_data for d in dishes
             ]
             for first_dish, _ in group_data:
                 all_dishes.append((first_dish, name))
 
-    translations = await translate_dishes(session, dishes_by_restaurant)
+    displayed_names = set(all_group_data.keys())
+    restaurants_to_display = [
+        r for r in valid_restaurants if r.get("name", "").strip() in displayed_names
+    ]
+
+    if not restaurants_to_display:
+        return [], []
+
+    location_cache = FileCache(Path("location_cache.json"))
+    location_tasks = [
+        get_location_name(r.get("name", "").strip(), r.get("location", {}), session, location_cache)
+        for r in restaurants_to_display
+    ]
+    location_results = await asyncio.gather(*location_tasks)
+    location_by_name = {
+        r.get("name", "").strip(): loc
+        for r, loc in zip(restaurants_to_display, location_results, strict=True)
+    }
+    location_cache.save()
+
+    translation_cache = FileCache(Path("translation_cache.json"))
+    translations = await translate_dishes(
+        session, dishes_by_restaurant, translation_cache
+    )
+    translation_cache.save()
 
     all_dishes = [
         (translations.get(dish_name, dish_name), restaurant)
         for dish_name, restaurant in all_dishes
     ]
 
-    # Format menus once with translations (parallel)
-    menus = await asyncio.gather(*[
-        format_restaurant_menu(r, diet_filter, session, translations)
-        for r in valid_restaurants
-    ])
+    menu_parts: list[str] = []
+    for restaurant in restaurants_to_display:
+        name = restaurant.get("name", "").strip()
+        group_data = all_group_data[name]
+        loc = location_by_name.get(name, "")
+        location_str = f" ({loc})" if loc else ""
 
-    menu_parts: List[str] = []
-    for menu, _ in menus:
+        menu = format_restaurant_menu(
+            restaurant,
+            common_prices.get(name),
+            group_data,
+            location_str,
+            translations,
+        )
         if menu:
             menu_parts.append(menu)
             menu_parts.append("➖" * 5 + "\n")
@@ -730,13 +676,12 @@ async def process_restaurants_for_diet(
 
 async def process_restaurants_for_halal(
     session: aiohttp.ClientSession, day_offset: int = 0
-) -> Tuple[List[str], List[Tuple[str, str]], Dict[str, Set[str]]]:
-    """Process restaurants for halal requirements (veg + fish)."""
+) -> tuple[list[str], list[tuple[str, str]], dict[str, set[str]]]:
     restaurants = await fetch_menus_with_offset(session, day_offset)
 
-    # Collect non-veg candidates for LLM fish filtering
-    candidates: List[Dict] = []
-    valid_restaurants = []
+    candidates: list[dict] = []
+    valid_restaurants: list[dict] = []
+    allowed_fish_by_restaurant: dict[str, set[str]] = defaultdict(set)
 
     for restaurant in restaurants:
         name = restaurant.get("name", "").strip()
@@ -756,70 +701,107 @@ async def process_restaurants_for_halal(
                 diets = item.get("diets", [])
                 price = item.get("price", "").strip()
 
-                if not is_veg(diets) and (
-                    not common_price or extract_prices(price) == common_price
-                ):
-                    candidates.append(
-                        {
-                            "id": f"{name}|{group_index}|{item_index}",
-                            "restaurant": name,
-                            "name": item_name,
-                            "diets": diets,
-                            "ingredients": item.get("ingredients", "").strip(),
-                        }
-                    )
+                if is_veg(diets):
+                    continue
 
-    # Filter fish dishes via LLM
+                if common_price and extract_prices(price) != common_price:
+                    continue
+
+                ingredients = item.get("ingredients", "").strip()
+                if _looks_like_fish(item_name, ingredients):
+                    allowed_fish_by_restaurant[name].add(item_name)
+                    continue
+
+                candidates.append(
+                    {
+                        "id": f"{name}|{group_index}|{item_index}",
+                        "restaurant": name,
+                        "name": item_name,
+                        "diets": diets,
+                        "ingredients": ingredients,
+                    }
+                )
+
     id_to_allow = await filter_fish_only(session, candidates)
-    allowed_fish_by_restaurant: Dict[str, Set[str]] = defaultdict(set)
 
     for candidate in candidates:
         if id_to_allow.get(candidate["id"], False):
             allowed_fish_by_restaurant[candidate["restaurant"]].add(candidate["name"])
 
-    def make_halal_filter(allowed_fish: Set[str]):
-        def halal_filter(item, item_diets, item_name):
-            return is_veg(item_diets) or item_name in allowed_fish
+    def make_halal_filter(restaurant_name: str):
+        allowed = allowed_fish_by_restaurant.get(restaurant_name, set())
+
+        def halal_filter(item: dict) -> bool:
+            return is_veg(item.get("diets", [])) or item.get("name", "").strip() in allowed
+
         return halal_filter
 
-    # Collect dish names for translation (fast, no HTTP calls)
-    dishes_by_restaurant: Dict[str, List[str]] = {}
-    all_dishes: List[Tuple[str, str]] = []
+    common_prices: dict[str, list[str] | None] = {}
+    all_group_data: dict[str, list[tuple[str, list[str]]]] = {}
+    dishes_by_restaurant: dict[str, list[str]] = {}
+    all_dishes: list[tuple[str, str]] = []
 
     for restaurant in valid_restaurants:
         name = restaurant.get("name", "").strip()
-        halal_filter = make_halal_filter(allowed_fish_by_restaurant[name])
+        filt = make_halal_filter(name)
+        common_price, group_data = collect_filtered_dishes(restaurant, filt)
 
-        group_data = collect_filtered_dishes(restaurant, halal_filter)
         if group_data:
+            common_prices[name] = common_price
+            all_group_data[name] = group_data
             dishes_by_restaurant[name] = [
                 d for _, dishes in group_data for d in dishes
             ]
             for first_dish, _ in group_data:
                 all_dishes.append((first_dish, name))
 
-    translations = await translate_dishes(session, dishes_by_restaurant)
+    displayed_names = set(all_group_data.keys())
+    restaurants_to_display = [
+        r for r in valid_restaurants if r.get("name", "").strip() in displayed_names
+    ]
+
+    if not restaurants_to_display:
+        return [], [], dict(allowed_fish_by_restaurant)
+
+    location_cache = FileCache(Path("location_cache.json"))
+    location_tasks = [
+        get_location_name(r.get("name", "").strip(), r.get("location", {}), session, location_cache)
+        for r in restaurants_to_display
+    ]
+    location_results = await asyncio.gather(*location_tasks, return_exceptions=True)
+    location_by_name = {
+        r.get("name", "").strip(): (loc if isinstance(loc, str) else "")
+        for r, loc in zip(restaurants_to_display, location_results, strict=True)
+    }
+    location_cache.save()
+
+    translation_cache = FileCache(Path("translation_cache.json"))
+    translations = await translate_dishes(
+        session, dishes_by_restaurant, translation_cache
+    )
+    translation_cache.save()
 
     all_dishes = [
         (translations.get(dish_name, dish_name), restaurant)
         for dish_name, restaurant in all_dishes
     ]
 
-    # Format menus once with translations (parallel)
-    menus = await asyncio.gather(*[
-        format_restaurant_menu(
-            r,
-            make_halal_filter(allowed_fish_by_restaurant[r.get("name", "").strip()]),
-            session,
+    menu_parts: list[str] = []
+    for restaurant in restaurants_to_display:
+        name = restaurant.get("name", "").strip()
+        group_data = all_group_data[name]
+        loc = location_by_name.get(name, "")
+        location_str = f" ({loc})" if loc else ""
+
+        menu = format_restaurant_menu(
+            restaurant,
+            common_prices.get(name),
+            group_data,
+            location_str,
             translations,
         )
-        for r in valid_restaurants
-    ])
-
-    menu_parts: List[str] = []
-    for menu, _ in menus:
         if menu:
             menu_parts.append(menu)
             menu_parts.append("➖" * 5 + "\n")
 
-    return menu_parts, all_dishes, allowed_fish_by_restaurant
+    return menu_parts, all_dishes, dict(allowed_fish_by_restaurant)

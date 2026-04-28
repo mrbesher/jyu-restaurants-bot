@@ -3,8 +3,7 @@ name: Post Daily Menus to Telegram
 on:
   schedule:
     - cron: "00 6 * * 1-5"
-
-  workflow_dispatch: # allows manual run
+  workflow_dispatch:
 
 jobs:
   post-menus:
@@ -14,24 +13,31 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Restore caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            location_cache.json
+            translation_cache.json
+          key: menu-bots-cache-${{ github.run_id }}
+          restore-keys: menu-bots-cache-
+
       - name: Set up uv
         uses: astral-sh/setup-uv@v6
 
       - name: Install dependencies
-        run: |
-          uv sync --frozen
+        run: uv sync --frozen
 
-      - name: Run bots
+      - name: Run diet bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          CHANNEL_ID="${{ secrets.VEGAN_CHANNEL_ID }}" uv run app.py &
-          pid1=$!
-          CHANNEL_ID="${{ secrets.HALAL_CHANNEL_ID }}" uv run halal_app.py &
-          pid2=$!
-          fail=0
-          wait $pid1 || fail=1
-          wait $pid2 || fail=1
-          exit $fail
+          CHANNEL_ID: ${{ secrets.VEGAN_CHANNEL_ID }}
+        run: uv run app.py
+
+      - name: Run halal bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CHANNEL_ID: ${{ secrets.HALAL_CHANNEL_ID }}
+        run: uv run halal_app.py
