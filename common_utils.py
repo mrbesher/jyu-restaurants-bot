@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -53,6 +54,33 @@ FISH_FILTER_SCHEMA = {
                 "allow": {"type": "boolean"},
             },
             "required": ["id", "allow"],
+        },
+    },
+}
+
+WEEKLY_PICKS_SCHEMA = {
+    "name": "weekly_picks_response",
+    "strict": "true",
+    "schema": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "day": {"type": "string"},
+                "picks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "dish": {"type": "string"},
+                            "restaurant": {"type": "string"},
+                            "kind": {"type": "string"},
+                        },
+                        "required": ["dish", "restaurant", "kind"],
+                    },
+                },
+            },
+            "required": ["day", "picks"],
         },
     },
 }
@@ -345,6 +373,26 @@ Example:
 """
 
 
+def build_weekly_picks_prompt(per_day: dict[str, list[dict]]) -> str:
+    payload = json.dumps(per_day, ensure_ascii=False, indent=2)
+    return f"""You are picking the top 2 halal-friendly highlights for each upcoming weekday.
+
+All dishes provided are already halal-friendly (vegetarian, fish, or seafood pizzas — no haram meat).
+
+RULES:
+1. PIZZA WINS ALWAYS. If a day has any pizza, prefer pizza picks over fish.
+2. Pick at most 2 dishes per day. Use 1 if only 1 candidate is available.
+3. Skip days with no candidates.
+4. Translate Finnish dish names to natural English. If already English, return as-is.
+5. "kind" must be either "pizza" or "fish" matching the input kind for the chosen dish.
+
+Dishes per day:
+{payload}
+
+Return a JSON array of objects, one per non-empty day, each with "day" (echo the day key) and "picks".
+"""
+
+
 def build_translation_prompt(dishes: list[str]) -> str:
     return f"""Translate the following dish names to English. If a dish name is already in English, return it exactly as is. Keep translations concise and food-appropriate.
 
@@ -369,6 +417,14 @@ _FISH_KEYWORDS = (
 def _looks_like_fish(item_name: str, ingredients: str) -> bool:
     text = f"{item_name} {ingredients}".lower()
     return any(kw in text for kw in _FISH_KEYWORDS)
+
+
+_PIZZA_KEYWORDS = ("pizza", "pitsa")
+
+
+def _looks_like_pizza(item_name: str) -> bool:
+    name_lower = item_name.lower()
+    return any(kw in name_lower for kw in _PIZZA_KEYWORDS)
 
 
 async def filter_fish_only(
@@ -810,3 +866,129 @@ async def process_restaurants_for_halal(
             menu_parts.append("➖" * 5 + "\n")
 
     return menu_parts, all_dishes, dict(allowed_fish_by_restaurant)
+
+
+def _gather_pizza_fish_for_day(
+    restaurants: list[dict], day_offset: int
+) -> tuple[list[dict], list[dict]]:
+    pre_allowed: list[dict] = []
+    llm_candidates: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    for restaurant in restaurants:
+        name = restaurant.get("name", "").strip()
+        if not name or should_skip_restaurant(name):
+            continue
+
+        items = restaurant.get("items", [])
+        common_price = get_common_price(items)
+
+        for gi, group in enumerate(items):
+            for ii, item in enumerate(group):
+                item_name = item.get("name", "").strip()
+                if not item_name:
+                    continue
+
+                key = (name, item_name)
+                if key in seen:
+                    continue
+
+                price = item.get("price", "").strip()
+                if common_price and extract_prices(price) and extract_prices(price) != common_price:
+                    continue
+
+                ingredients = item.get("ingredients", "").strip()
+                is_pizza = _looks_like_pizza(item_name)
+                is_fish = _looks_like_fish(item_name, ingredients)
+                if not (is_pizza or is_fish):
+                    continue
+
+                seen.add(key)
+                kind = "pizza" if is_pizza else "fish"
+                diets = item.get("diets", [])
+
+                if is_veg(diets) or is_fish:
+                    pre_allowed.append(
+                        {"restaurant": name, "name": item_name, "kind": kind}
+                    )
+                else:
+                    llm_candidates.append({
+                        "id": f"D{day_offset}|{name}|{gi}|{ii}",
+                        "day_offset": day_offset,
+                        "restaurant": name,
+                        "name": item_name,
+                        "diets": diets,
+                        "ingredients": ingredients,
+                        "kind": kind,
+                    })
+
+    return pre_allowed, llm_candidates
+
+
+def _format_weekly_picks_message(parsed: list[dict]) -> str:
+    lines = ["🍕🐟 *This Week: Pizza & Fish Halal Highlights*"]
+    has_any = False
+    for day_obj in parsed:
+        picks = day_obj.get("picks") or []
+        if not picks:
+            continue
+        has_any = True
+        lines.append(f"\n*{day_obj.get('day', '')}*")
+        for pick in picks:
+            emoji = "🍕" if pick.get("kind") == "pizza" else "🐟"
+            dish = pick.get("dish", "").strip()
+            rest = pick.get("restaurant", "").strip()
+            if dish and rest:
+                lines.append(f"{emoji} *{dish}* @ _{rest}_")
+    return "\n".join(lines) if has_any else ""
+
+
+async def process_weekly_pizza_fish_picks(
+    session: aiohttp.ClientSession,
+) -> str:
+    today = datetime.date.today()
+    per_day_allowed: dict[int, list[dict]] = defaultdict(list)
+    pooled_llm_candidates: list[dict] = []
+
+    for offset in range(5):
+        restaurants = await fetch_menus_with_offset(session, offset)
+        pre_allowed, llm_candidates = _gather_pizza_fish_for_day(restaurants, offset)
+        per_day_allowed[offset].extend(pre_allowed)
+        pooled_llm_candidates.extend(llm_candidates)
+
+    if pooled_llm_candidates:
+        filter_input = [
+            {k: c[k] for k in ("id", "restaurant", "name", "diets", "ingredients")}
+            for c in pooled_llm_candidates
+        ]
+        id_to_allow = await filter_fish_only(session, filter_input)
+        for c in pooled_llm_candidates:
+            if id_to_allow.get(c["id"], False):
+                per_day_allowed[c["day_offset"]].append(
+                    {"restaurant": c["restaurant"], "name": c["name"], "kind": c["kind"]}
+                )
+
+    ranking_input: dict[str, list[dict]] = {}
+    for offset, dishes in sorted(per_day_allowed.items()):
+        if not dishes:
+            continue
+        day_label = (today + datetime.timedelta(days=offset)).strftime("%A, %B %d")
+        ranking_input[day_label] = dishes
+
+    if not ranking_input:
+        return ""
+
+    prompt = build_weekly_picks_prompt(ranking_input)
+    try:
+        content = await llm_chat_json(
+            session,
+            [{"role": "user", "content": prompt}],
+            WEEKLY_PICKS_SCHEMA,
+            temperature=0.2,
+        )
+        parsed = json.loads(content)
+    except Exception as e:
+        logger.error("Weekly picks LLM call failed: %s", e)
+        return ""
+
+    return _format_weekly_picks_message(parsed)
