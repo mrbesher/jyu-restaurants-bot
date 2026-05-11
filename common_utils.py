@@ -409,14 +409,17 @@ _FISH_KEYWORDS = (
     "seafood", "calamari", "squid", "mussel", "oyster", "crab",
     "lobster", "anchovy", "sardine", "plaice", "pangasius", "tilapia",
     "kala", "lohi", "tonnikala", "katkarapu", "siika", "ahven", "hauki",
-    "kuha", "silakka", "silli", "muikku", "made", "kirjolohi", "nieriä",
+    "kuha", "silakka", "muikku", "kirjolohi", "nieriä",
     "merenelävät",
+)
+
+_FISH_PATTERN = re.compile(
+    r"\b(" + "|".join(_FISH_KEYWORDS) + r")\b", re.IGNORECASE
 )
 
 
 def _looks_like_fish(item_name: str, ingredients: str) -> bool:
-    text = f"{item_name} {ingredients}".lower()
-    return any(kw in text for kw in _FISH_KEYWORDS)
+    return bool(_FISH_PATTERN.search(f"{item_name} {ingredients}"))
 
 
 _PIZZA_KEYWORDS = ("pizza", "pitsa")
@@ -769,10 +772,6 @@ async def process_restaurants_for_halal(
                     continue
 
                 ingredients = item.get("ingredients", "").strip()
-                if _looks_like_fish(item_name, ingredients):
-                    allowed_fish_by_restaurant[name].add(item_name)
-                    continue
-
                 candidates.append(
                     {
                         "id": f"{name}|{group_index}|{item_index}",
@@ -907,7 +906,7 @@ def _gather_pizza_fish_for_day(
                 kind = "pizza" if is_pizza else "fish"
                 diets = item.get("diets", [])
 
-                if is_veg(diets) or is_fish:
+                if is_veg(diets):
                     pre_allowed.append(
                         {"restaurant": name, "name": item_name, "kind": kind}
                     )
