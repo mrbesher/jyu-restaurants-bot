@@ -172,18 +172,15 @@ def extract_prices(price_string: str) -> list[str]:
     return matches
 
 
-def get_common_price(items: list[list[dict]]) -> list[str] | None:
+def detect_student_price(restaurants: list[dict]) -> str | None:
     counts = Counter()
-    for group in items:
-        for item in group:
-            price_str = item.get("price", "").strip()
-            if price_str:
-                prices = tuple(extract_prices(price_str))
+    for restaurant in restaurants:
+        for group in restaurant.get("items", []):
+            for item in group:
+                prices = extract_prices(item.get("price", ""))
                 if prices:
-                    counts[prices] += 1
-    if not counts:
-        return None
-    return list(counts.most_common(1)[0][0])
+                    counts[prices[0]] += 1
+    return counts.most_common(1)[0][0] if counts else None
 
 
 @retry_with_backoff()
@@ -556,16 +553,19 @@ async def translate_dishes(
 
 
 def collect_filtered_dishes(
-    restaurant: dict, filter_func
-) -> tuple[list[str] | None, list[tuple[str, list[str]]]]:
+    restaurant: dict, filter_func, student_price: str | None
+) -> tuple[str | None, list[tuple[str, list[str]]]]:
     name = restaurant.get("name", "").strip()
     items = restaurant.get("items", [])
 
     if not name or not items or should_skip_restaurant(name):
         return None, []
 
-    common_price = get_common_price(items)
-    if not common_price and name not in NO_PRICE_LIMIT_EXCEPTIONS:
+    has_any_price = any(
+        extract_prices(it.get("price", ""))
+        for grp in items for it in grp
+    )
+    if not has_any_price and name not in NO_PRICE_LIMIT_EXCEPTIONS:
         items = items[:4]
 
     seen_items: set[str] = set()
@@ -580,9 +580,9 @@ def collect_filtered_dishes(
                 continue
 
             item_price = item.get("price", "").strip()
-            if common_price:
+            if student_price and has_any_price:
                 item_prices = extract_prices(item_price)
-                if item_prices and item_prices != common_price:
+                if item_prices and student_price not in item_prices:
                     continue
 
             if filter_func(item):
@@ -592,12 +592,12 @@ def collect_filtered_dishes(
         if group_dishes:
             group_data.append((group_dishes[0], group_dishes))
 
-    return common_price, group_data
+    return (student_price if has_any_price else None), group_data
 
 
 def format_restaurant_menu(
     restaurant: dict,
-    common_price: list[str] | None,
+    student_price: str | None,
     groups: list[tuple[str, list[str]]],
     location_name: str = "",
     translations: dict[str, str] | None = None,
@@ -614,7 +614,7 @@ def format_restaurant_menu(
         menu_groups.append(" + ".join(display_names))
 
     opening_hours = restaurant.get("time", "")
-    price_info = f"💶 _{' / '.join(common_price)}_" if common_price else ""
+    price_info = f"💶 _from {student_price} €_" if student_price else ""
 
     time_price_info = ""
     if opening_hours:
@@ -655,6 +655,7 @@ async def process_restaurants_for_diet(
     session: aiohttp.ClientSession, diets: set[str], day_offset: int = 0
 ) -> tuple[list[str], list[tuple[str, str]]]:
     restaurants = await fetch_menus_with_offset(session, day_offset)
+    student_price = detect_student_price(restaurants)
 
     normalized_diets = {normalize_diet(d) for d in diets}
 
@@ -664,7 +665,7 @@ async def process_restaurants_for_diet(
         return normalized_diets <= normalized_item_diets
 
     valid_restaurants: list[dict] = []
-    common_prices: dict[str, list[str] | None] = {}
+    student_prices: dict[str, str | None] = {}
     all_group_data: dict[str, list[tuple[str, list[str]]]] = {}
     dishes_by_restaurant: dict[str, list[str]] = {}
     all_dishes: list[tuple[str, str]] = []
@@ -675,10 +676,10 @@ async def process_restaurants_for_diet(
             continue
 
         valid_restaurants.append(restaurant)
-        common_price, group_data = collect_filtered_dishes(restaurant, diet_filter)
+        sp, group_data = collect_filtered_dishes(restaurant, diet_filter, student_price)
 
         if group_data:
-            common_prices[name] = common_price
+            student_prices[name] = sp
             all_group_data[name] = group_data
             dishes_by_restaurant[name] = [
                 d for _, dishes in group_data for d in dishes
@@ -726,7 +727,7 @@ async def process_restaurants_for_diet(
 
         menu = format_restaurant_menu(
             restaurant,
-            common_prices.get(name),
+            student_prices.get(name),
             group_data,
             location_str,
             translations,
@@ -742,6 +743,7 @@ async def process_restaurants_for_halal(
     session: aiohttp.ClientSession, day_offset: int = 0
 ) -> tuple[list[str], list[tuple[str, str]], dict[str, set[str]]]:
     restaurants = await fetch_menus_with_offset(session, day_offset)
+    student_price = detect_student_price(restaurants)
 
     candidates: list[dict] = []
     valid_restaurants: list[dict] = []
@@ -754,7 +756,6 @@ async def process_restaurants_for_halal(
 
         valid_restaurants.append(restaurant)
         items = restaurant.get("items", [])
-        common_price = get_common_price(items)
 
         for group_index, group in enumerate(items):
             for item_index, item in enumerate(group):
@@ -768,7 +769,8 @@ async def process_restaurants_for_halal(
                 if is_veg(diets):
                     continue
 
-                if common_price and extract_prices(price) != common_price:
+                item_prices = extract_prices(price)
+                if student_price and item_prices and student_price not in item_prices:
                     continue
 
                 ingredients = item.get("ingredients", "").strip()
@@ -796,7 +798,7 @@ async def process_restaurants_for_halal(
 
         return halal_filter
 
-    common_prices: dict[str, list[str] | None] = {}
+    student_prices: dict[str, str | None] = {}
     all_group_data: dict[str, list[tuple[str, list[str]]]] = {}
     dishes_by_restaurant: dict[str, list[str]] = {}
     all_dishes: list[tuple[str, str]] = []
@@ -804,10 +806,10 @@ async def process_restaurants_for_halal(
     for restaurant in valid_restaurants:
         name = restaurant.get("name", "").strip()
         filt = make_halal_filter(name)
-        common_price, group_data = collect_filtered_dishes(restaurant, filt)
+        sp, group_data = collect_filtered_dishes(restaurant, filt, student_price)
 
         if group_data:
-            common_prices[name] = common_price
+            student_prices[name] = sp
             all_group_data[name] = group_data
             dishes_by_restaurant[name] = [
                 d for _, dishes in group_data for d in dishes
@@ -855,7 +857,7 @@ async def process_restaurants_for_halal(
 
         menu = format_restaurant_menu(
             restaurant,
-            common_prices.get(name),
+            student_prices.get(name),
             group_data,
             location_str,
             translations,
@@ -868,7 +870,7 @@ async def process_restaurants_for_halal(
 
 
 def _gather_pizza_fish_for_day(
-    restaurants: list[dict], day_offset: int
+    restaurants: list[dict], day_offset: int, student_price: str | None
 ) -> tuple[list[dict], list[dict]]:
     pre_allowed: list[dict] = []
     llm_candidates: list[dict] = []
@@ -880,7 +882,6 @@ def _gather_pizza_fish_for_day(
             continue
 
         items = restaurant.get("items", [])
-        common_price = get_common_price(items)
 
         for gi, group in enumerate(items):
             for ii, item in enumerate(group):
@@ -893,7 +894,8 @@ def _gather_pizza_fish_for_day(
                     continue
 
                 price = item.get("price", "").strip()
-                if common_price and extract_prices(price) and extract_prices(price) != common_price:
+                item_prices = extract_prices(price)
+                if student_price and item_prices and student_price not in item_prices:
                     continue
 
                 ingredients = item.get("ingredients", "").strip()
@@ -949,9 +951,12 @@ async def process_weekly_pizza_fish_picks(
     per_day_allowed: dict[int, list[dict]] = defaultdict(list)
     pooled_llm_candidates: list[dict] = []
 
+    student_price: str | None = None
     for offset in range(5):
         restaurants = await fetch_menus_with_offset(session, offset)
-        pre_allowed, llm_candidates = _gather_pizza_fish_for_day(restaurants, offset)
+        if student_price is None:
+            student_price = detect_student_price(restaurants)
+        pre_allowed, llm_candidates = _gather_pizza_fish_for_day(restaurants, offset, student_price)
         per_day_allowed[offset].extend(pre_allowed)
         pooled_llm_candidates.extend(llm_candidates)
 
