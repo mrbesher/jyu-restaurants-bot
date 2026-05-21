@@ -3,7 +3,7 @@ name: Post Daily Menus to Telegram
 on:
   schedule:
     - cron: "00 5 * * 1-5"
-    - cron: "30 4 * * 1"
+    - cron: "00 6 * * 1"
   workflow_dispatch:
 
 jobs:
@@ -45,7 +45,7 @@ jobs:
         run: uv run halal_app.py
 
   post-weekly-picks:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '30 4 * * 1' }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '00 6 * * 1' }}
     runs-on: ubuntu-latest
 
     steps:
